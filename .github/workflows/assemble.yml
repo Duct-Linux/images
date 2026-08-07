@@ -37,8 +37,13 @@ env:
   # What each image is. tape resolves dependencies itself, so these could be
   # shorter -- listing them makes the contents a reviewable decision rather than
   # a consequence of whatever some recipe happens to depend on.
+  # ca-certificates is not optional here despite nothing linking against it:
+  # without a trust store tape cannot complete a TLS handshake, so an image
+  # missing it can never install or update anything from the repository it was
+  # built from. It has to arrive in the image because it cannot be fetched by a
+  # client that does not already have it.
   BASE_PACKAGES: >-
-    duct-filesystem linux-headers glibc zlib gmp mpfr mpc
+    duct-filesystem ca-certificates linux-headers glibc zlib gmp mpfr mpc
     binutils gcc ncurses bash uutils-coreutils tape
   BUILDER_EXTRA: >-
     m4 bison flex make gawk sed grep findutils diffutils
