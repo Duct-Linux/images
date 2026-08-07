@@ -1,0 +1,4 @@
+# Assembling an image needs the trust anchor and nothing else: every package
+# comes off the repository server over HTTPS.
+*
+!packages/server/duct.key.pub

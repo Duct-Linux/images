@@ -1,0 +1,123 @@
+# syntax=docker/dockerfile:1.7
+#
+# duct/base and duct/builder -- assembled from the published repository.
+#
+# The same Dockerfile builds both; they differ only in PACKAGES.
+#
+# This installs over HTTPS from repo.duct.dss-net.de rather than from a local
+# directory, which is the point: the image is built the way a user's machine
+# would be, from the same signed index, verifying the same signature against the
+# same public key. If the published repository is broken, this build fails --
+# which is a far better place to find out than a user's first `tape install`.
+#
+# It also breaks a circularity. Assembling from a local repo meant the images
+# could only be built where the packages had just been built; now anything that
+# can reach the repo server can produce them, and the expensive bootstrap
+# (Duct-Linux/images) is only needed to create the toolchain in the first place.
+#
+#   docker buildx build -f images/Dockerfile.base \
+#     --build-arg PACKAGES="duct-filesystem glibc ... tape" .
+
+ARG BOOTSTRAP=ghcr.io/duct-linux/bootstrap:latest
+
+# ---------------------------------------------------------------------------
+# Stage 1 -- install packages into /rootfs from the published repository.
+# ---------------------------------------------------------------------------
+FROM ${BOOTSTRAP} AS assemble
+
+ARG PACKAGES="duct-filesystem tape"
+ARG REPO_NAME=duct
+ARG REPO_URL=https://repo.duct.dss-net.de
+
+# The daemon writes the rootfs, so it must run as root or every file in the
+# image ends up owned by uid 1000. The bootstrap image drops to `builder` for
+# package builds, which is right there and wrong here.
+USER root
+
+# The trust anchor, and the only thing here that does not come off the network.
+# Everything else -- index, signature, packages -- is fetched and verified
+# against this key.
+COPY packages/server/duct.key.pub /etc/duct-assemble/keys/duct.pub
+
+# tape's config lives outside the sysroot, so the assembly uses its own
+# TAPE_CONFIG_DIR rather than disturbing the bootstrap image's /etc/tape.
+#
+# installed-db has to be set explicitly: it is NOT sysroot-relative (the daemon
+# reads daemon.installed-db directly), so without this the files land in /rootfs
+# and the record of them lands in the *bootstrap image's* database -- an image
+# with no idea what it contains. Stored paths are sysroot-relative, so the
+# database is correct where it ends up.
+#
+# The repo config filename is load-bearing: the signature is bound to the
+# repository name via `sign-repo --name duct`, and tape derives that name from
+# this file's basename.
+RUN set -eux; \
+    install -d /etc/duct-assemble/repos; \
+    { \
+      echo '[daemon]'; \
+      echo 'sysroot = "/rootfs"'; \
+      echo 'installed-db = "/rootfs/var/lib/tape/installed.db"'; \
+      echo 'socket = "/run/tape-assemble.sock"'; \
+      echo 'cache-dir = "/var/cache/duct-assemble"'; \
+    } > /etc/duct-assemble/config.toml; \
+    { \
+      echo '[repo]'; \
+      echo 'name = "Duct"'; \
+      printf 'baseurl = "%s"\n' "${REPO_URL}"; \
+      echo 'enabled = true'; \
+    } > /etc/duct-assemble/repos/${REPO_NAME}.toml
+
+# One daemon for the whole transaction. cli.daemon-start would spawn and SIGINT
+# a fresh daemon per `tape` invocation, which works but is pointless churn.
+RUN set -eux; \
+    export TAPE_CONFIG_DIR=/etc/duct-assemble; \
+    install -d /rootfs /run; \
+    taped & \
+    daemon_pid=$!; \
+    for i in $(seq 1 100); do [ -S /run/tape-assemble.sock ] && break; sleep 0.1; done; \
+    [ -S /run/tape-assemble.sock ] || { echo "taped did not come up" >&2; exit 1; }; \
+    tape install -y ${PACKAGES}; \
+    status=$?; \
+    kill "$daemon_pid"; wait "$daemon_pid" 2>/dev/null || true; \
+    exit $status
+
+# Everything tape needs at runtime that sysroot does not cover: its config
+# directory and cache both resolve from absolute paths that know nothing about
+# the sysroot. The repo definition and public key are installed into the image
+# too, so the result can update itself from the same repository it came from.
+RUN set -eux; \
+    install -d /rootfs/etc/tape/repos /rootfs/etc/tape/keys /rootfs/var/cache/tape/repos; \
+    cp /etc/duct-assemble/repos/${REPO_NAME}.toml /rootfs/etc/tape/repos/; \
+    cp /etc/duct-assemble/keys/duct.pub /rootfs/etc/tape/keys/; \
+    \
+    # tape strips the sticky bit on install, so the 1777 that duct-filesystem
+    # intends arrives as 0777. Restore it.
+    chmod 1777 /rootfs/tmp /rootfs/var/tmp; \
+    \
+    # Run the target's own ldconfig under chroot rather than the build host's
+    # with -r: same architecture, so it executes, and the cache is then written
+    # by the same glibc that will read it. There are no install hooks in tape,
+    # so this is the only point at which it can happen.
+    if [ -x /rootfs/usr/sbin/ldconfig ]; then \
+        chroot /rootfs /usr/sbin/ldconfig || ldconfig -r /rootfs || true; \
+    fi
+
+# ---------------------------------------------------------------------------
+FROM scratch
+
+ARG IMAGE_TITLE="Duct base"
+ARG IMAGE_DESCRIPTION="Minimal Duct system, assembled from the published repository by tape"
+
+LABEL org.opencontainers.image.title="${IMAGE_TITLE}" \
+      org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.source="https://github.com/Duct-Linux/images" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
+COPY --from=assemble /rootfs/ /
+
+ENV PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin \
+    TZ=UTC \
+    LC_ALL=C \
+    HOME=/root
+
+CMD ["/usr/bin/bash"]

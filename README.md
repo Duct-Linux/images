@@ -19,8 +19,27 @@ duct/base        Assembled by tape from the signed repository built in
 duct/builder     ../packages.  make base builder && make images-test
 ```
 
-`duct/rust` (`make rust`) exists only to build uutils-coreutils, which is the
-one package written in a language Duct does not package.
+`duct/rust` (`make rust`) exists only to build uutils-coreutils, the one package
+written in a language Duct does not package.
+
+## Two halves, very different costs
+
+**Bootstrap** (`.github/workflows/bootstrap.yml`, manual) builds a toolchain from
+nothing -- LFS chapters 5 to 7, about an hour per architecture, natively on its
+own runner. It exists to bring up an architecture, and publishes `duct/bootstrap`
+and `duct/chroot`.
+
+**Assemble** (`.github/workflows/assemble.yml`) builds `duct/base` and
+`duct/builder` by installing from the published repository at
+repo.duct.dss-net.de. That takes about a minute, because it is downloading and
+unpacking rather than compiling.
+
+Assembling from the repository rather than a local build tree is deliberate: the
+build fetches the same index, verifies the same signature against the same
+public key and checks the same digests a user's machine would, so a broken
+publish fails in CI rather than on someone's first `tape install`. The resulting
+images carry the repo definition and the key, so they can update themselves from
+the repository they came from.
 
 This repo expects `tape`, `packages` and `images` checked out as siblings: the
 Docker build context is their common parent, because the bootstrap image

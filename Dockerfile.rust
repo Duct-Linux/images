@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+#
+# duct/rust -- duct/builder plus a pinned Rust, for uutils-coreutils only.
+#
+# uutils is the one package written in a language Duct does not package. Built
+# on duct/builder rather than duct/chroot: builder is a Duct system with Duct's
+# gcc and Duct's glibc, so uutils compiles natively against exactly the
+# libraries that ship -- no cross-linker, no sysroot, no --target. The only
+# thing imported is rustc itself.
+#
+# It is also an order of magnitude smaller. The chroot carries every temporary
+# tool from the bootstrap; builder carries the shipped packages and nothing
+# else.
+#
+# The imported rustc links against an older glibc than Duct ships, which is
+# fine in that direction: glibc keeps backward compatibility.
+
+ARG BUILDER=ghcr.io/duct-linux/builder:latest
+ARG BOOTSTRAP=ghcr.io/duct-linux/bootstrap:latest
+
+# Only for its CA bundle, below.
+FROM ${BOOTSTRAP} AS certs
+
+FROM ${BUILDER}
+
+ARG RUST_VERSION=1.97.1
+ARG RUST_SHA256_AARCH64=9a7a2c336b4787f1b72f6bab7c35d5b7af2fd03cbd39b4fc721466a70d402a7d
+ARG RUST_SHA256_X86_64=88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f
+
+ENV PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin \
+    CARGO_HOME=/tmp/cargo
+
+# Duct ships no curl, wget or CA bundle, so the tarball comes in as a build
+# context rather than being downloaded here -- and is checked against the pin
+# before anything is unpacked.
+RUN --mount=type=bind,from=ductrust,target=/rustsrc,ro \
+    set -eux; \
+    arch=$(uname -m); \
+    case "$arch" in \
+      aarch64) triple=aarch64-unknown-linux-gnu; want=${RUST_SHA256_AARCH64} ;; \
+      x86_64)  triple=x86_64-unknown-linux-gnu;  want=${RUST_SHA256_X86_64}  ;; \
+      *) echo "no pinned Rust for $arch" >&2; exit 1 ;; \
+    esac; \
+    file=/rustsrc/rust-${RUST_VERSION}-${triple}.tar.xz; \
+    [ -f "$file" ] || { echo "missing $file" >&2; exit 1; }; \
+    got=$(sha256sum "$file" | cut -d' ' -f1); \
+    [ "$got" = "$want" ] || { echo "rust sha256 mismatch: want $want got $got" >&2; exit 1; }; \
+    mkdir -p /tmp/rust; \
+    tar -xf "$file" -C /tmp/rust --strip-components=1; \
+    /tmp/rust/install.sh --prefix=/usr/local \
+        --components=rustc,cargo,rust-std-${triple}; \
+    rm -rf /tmp/rust; \
+    rustc --version; \
+    cargo --version
+
+# uutils' crates come from crates.io and are not vendored upstream, so cargo
+# needs a trust store. Duct has no ca-certificates package yet -- that means
+# packaging OpenSSL and a certificate set, which is its own decision. What
+# integrity there is does not rest on this anyway: Cargo.lock pins every crate
+# to an exact version and sha256.
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+LABEL org.opencontainers.image.title="Duct Rust environment" \
+      org.opencontainers.image.description="duct/builder plus a pinned Rust, for building uutils-coreutils natively against Duct glibc" \
+      org.opencontainers.image.source="https://github.com/Duct-Linux/images"
