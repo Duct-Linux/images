@@ -1,0 +1,126 @@
+name: bootstrap
+
+# Builds a Duct toolchain from nothing: LFS chapters 5 to 7, ending in
+# duct/chroot -- a self-contained system with its own gcc, glibc and shell, and
+# the cross toolchain deleted to prove it stands alone.
+#
+# This is the expensive, rare half of the pipeline. It exists to bring up an
+# architecture, not to build packages: once duct/chroot and duct/bootstrap are
+# published for an architecture, Duct-Linux/packages takes over and builds every
+# package inside them.
+#
+# Natively, never emulated. A gcc bootstrap under QEMU measured ~27x slower than
+# native, which turns half an hour into most of a day.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Which architecture'
+        type: choice
+        options: [x86_64, aarch64, both]
+        default: x86_64
+      push:
+        description: 'Push to GHCR'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/duct-linux
+
+jobs:
+  bootstrap:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64  }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Should this architecture run?
+        id: want
+        run: |
+          if [ '${{ inputs.arch }}' = 'both' ] || [ '${{ inputs.arch }}' = '${{ matrix.arch }}' ]; then
+            echo "yes=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "yes=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::${{ matrix.arch }} not requested; skipping"
+          fi
+
+      # tape, packages and images have to be siblings: the Docker build context
+      # is their common parent, because the bootstrap image compiles tape from
+      # source and the toolchain reads packages/pkgs/versions.env.
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.yes == 'true'
+        with: { path: images }
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.yes == 'true'
+        with: { repository: Duct-Linux/tape, path: tape }
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.yes == 'true'
+        with: { repository: Duct-Linux/packages, path: packages }
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.want.outputs.yes == 'true'
+      - uses: docker/login-action@v3
+        if: steps.want.outputs.yes == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache upstream sources
+        if: steps.want.outputs.yes == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/duct/sources
+          key: duct-sources-${{ matrix.arch }}-${{ hashFiles('packages/pkgs/versions.env') }}
+          restore-keys: duct-sources-
+
+      # Upstream mirrors are unreliable enough that losing an hour of work to a
+      # single 502 is not a reasonable failure mode.
+      - name: Fetch sources
+        if: steps.want.outputs.yes == 'true'
+        working-directory: packages
+        run: |
+          for attempt in 1 2 3; do
+            ./tools/pin-versions.sh && exit 0
+            echo "::warning::source fetch attempt $attempt failed; retrying"
+            sleep 30
+          done
+          exit 1
+
+      - name: Bootstrap image
+        if: steps.want.outputs.yes == 'true'
+        working-directory: images
+        run: make build JOBS=$(nproc)
+
+      - name: Cross toolchain (LFS 5 and 6)
+        if: steps.want.outputs.yes == 'true'
+        working-directory: images
+        run: make toolchain JOBS=$(nproc)
+
+      # The gate: the cross toolchain is deleted building this image, so
+      # anything that still depended on it fails here rather than silently.
+      - name: Chroot image (LFS 7)
+        if: steps.want.outputs.yes == 'true'
+        working-directory: images
+        run: |
+          make chroot JOBS=$(nproc)
+          make chroot-test
+
+      - name: Push
+        if: steps.want.outputs.yes == 'true' && inputs.push
+        run: |
+          set -euo pipefail
+          for img in bootstrap chroot; do
+            docker tag "duct/$img:latest" "$REGISTRY/$img:${{ matrix.arch }}"
+            docker push "$REGISTRY/$img:${{ matrix.arch }}"
+          done
+          echo "::notice::${{ matrix.arch }} bootstrap published; run 'build packages' in Duct-Linux/packages next"

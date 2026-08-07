@@ -1,0 +1,5 @@
+*
+!images/toolchain/
+!packages/pkgs/versions.env
+
+**/.git/

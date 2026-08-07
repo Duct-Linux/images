@@ -1,0 +1,193 @@
+# syntax=docker/dockerfile:1.7
+#
+# duct/toolchain -- the cross toolchain, LFS chapter 5.
+#
+# A compiler that runs on the bootstrap host but targets $DUCT_TGT and links
+# against Duct's own glibc. Everything it produces goes to /duct; none of it is
+# packaged. It is scaffolding, and it is thrown away once the real packages have
+# been built with it.
+#
+# One RUN per stage, deliberately. These are long builds -- gcc alone is tens of
+# minutes -- and a failure in glibc should not mean recompiling binutils. Each
+# stage also deletes its build tree in the same RUN, so the multi-gigabyte
+# intermediate sources never land in a layer.
+#
+#   docker buildx build -f docker/Dockerfile.toolchain -t duct/toolchain .
+
+ARG BOOTSTRAP=duct/bootstrap:latest
+FROM ${BOOTSTRAP} AS toolchain
+
+ARG DUCT_JOBS=4
+
+USER root
+
+# Host prerequisites LFS is explicit about and Debian gets wrong by default.
+# None of these are cosmetic:
+#   /bin/sh  Debian points it at dash. Several configure scripts in glibc and
+#            gcc are written against bash behaviour, and the failures are
+#            obscure rather than immediate.
+#   awk      Debian's default is mawk; gawk is required, and mawk fails on the
+#            scripts glibc generates rather than diagnosing itself.
+#   yacc     bison's own wrapper, expected under this name by older build rules.
+RUN set -eux; \
+    ln -sfn bash /bin/sh; \
+    ln -sfn gawk /usr/bin/awk; \
+    printf '#!/bin/sh\nexec bison -y "$@"\n' > /usr/bin/yacc; \
+    chmod 0755 /usr/bin/yacc; \
+    [ "$(readlink -f /bin/sh)" = /usr/bin/bash ] || { echo "/bin/sh is not bash" >&2; exit 1; }
+
+RUN install -d -o builder -g builder /duct /duct-src /duct-src/toolchain
+USER builder
+
+# One COPY per stage, each immediately before the RUN that uses it.
+#
+# A COPY is a cache boundary: everything after it rebuilds when its contents
+# change. Copying the whole toolchain directory at once meant a one-line fix to
+# libstdc++ threw away binutils and gcc pass 1 -- twenty minutes to re-derive
+# artifacts that could not possibly have changed. Copying each script just
+# before it runs means an edit invalidates exactly the stages downstream of it,
+# which is the correct answer and also the cheapest.
+#
+# common.sh is shared by every stage, so editing it does invalidate everything.
+# That is honest: every stage really does depend on it.
+COPY --chown=builder:builder packages/pkgs/versions.env /duct-src/versions.env
+COPY --chown=builder:builder images/toolchain/common.sh /duct-src/toolchain/
+
+# LC_ALL=POSIX and a PATH with $TOOLS first are set by toolchain/common.sh; what
+# has to be in the environment here is only what the scripts read.
+ENV DUCT=/duct \
+    VERSIONS=/duct-src/versions.env \
+    DUCT_SRC_CACHE=/srccache \
+    DUCT_JOBS=${DUCT_JOBS}
+
+# The source cache is a BuildKit cache mount rather than part of the context:
+# the tarballs total about 400 MB, and pulling them through the context would
+# invalidate every layer whenever any of them changed. uid/gid are set because
+# cache mounts are root-owned by default and these stages run as builder.
+#
+# Every download is verified against the sha256 pinned in versions.env before
+# it is unpacked, so a poisoned cache cannot survive.
+
+COPY --chown=builder:builder images/toolchain/00-prepare.sh /duct-src/toolchain/
+RUN /duct-src/toolchain/00-prepare.sh
+
+COPY --chown=builder:builder images/toolchain/01-binutils-pass1.sh /duct-src/toolchain/
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/01-binutils-pass1.sh && rm -rf /duct/build
+
+COPY --chown=builder:builder images/toolchain/02-gcc-pass1.sh /duct-src/toolchain/
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/02-gcc-pass1.sh && rm -rf /duct/build
+
+COPY --chown=builder:builder images/toolchain/03-linux-headers.sh /duct-src/toolchain/
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/03-linux-headers.sh && rm -rf /duct/build
+
+COPY --chown=builder:builder images/toolchain/04-glibc.sh /duct-src/toolchain/
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/04-glibc.sh && rm -rf /duct/build
+
+COPY --chown=builder:builder images/toolchain/05-libstdcxx.sh /duct-src/toolchain/
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/05-libstdcxx.sh && rm -rf /duct/build
+
+# ---------------------------------------------------------------------------
+# Temporary tools, LFS chapter 6. Cross-compiled into /duct with the toolchain
+# above, and enough of a userland to run a native build inside the target
+# system. All of it is replaced by real packages later.
+#
+# Ordered: m4 before bison's generators, ncurses before bash, and the two
+# compiler passes last so they link against the libraries built here.
+#
+# This COPY is deliberately below the pass-1 stages: editing a recipe here must
+# not invalidate the toolchain above it.
+# ---------------------------------------------------------------------------
+
+COPY --chown=builder:builder images/toolchain/06-temp-tools.sh /duct-src/toolchain/
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh m4 && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh ncurses && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh bash && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh coreutils && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh diffutils && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh file && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh findutils && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh gawk && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh grep && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh gzip && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh make && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh patch && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh sed && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh tar && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh xz && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh binutils-pass2 && rm -rf /duct/build
+
+RUN --mount=type=cache,target=/srccache,uid=1000,gid=1000 \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/06-temp-tools.sh gcc-pass2 && rm -rf /duct/build
+
+# A last check on the assembled result rather than on any one stage: the cross
+# compiler must exist, must be the one under /duct/tools, and must still produce
+# binaries that name Duct's loader.
+RUN set -eux; \
+    . /duct-src/toolchain/common.sh; \
+    command -v "$DUCT_TGT-gcc"; \
+    echo 'int main(void){return 0;}' > /tmp/t.c; \
+    "$DUCT_TGT-gcc" /tmp/t.c -o /tmp/t; \
+    readelf -l /tmp/t | grep -q "$LOADER" || { echo "wrong loader" >&2; exit 1; }; \
+    rm -f /tmp/t /tmp/t.c
+
+LABEL org.opencontainers.image.title="Duct cross toolchain" \
+      org.opencontainers.image.description="LFS-style pass-1 cross toolchain targeting Duct"

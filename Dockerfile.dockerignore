@@ -1,0 +1,17 @@
+# The builder image only needs the tape sources. Everything else in the Duct
+# tree -- the distro rootfs tarball especially -- would just bloat the context
+# and invalidate the build cache on unrelated changes.
+#
+# BuildKit prefers this file over a .dockerignore at the context root, which is
+# what keeps the Duct root free of Docker bookkeeping.
+
+*
+!tape/
+
+tape/bin/
+tape/dev/tmp/
+tape/tmp/
+
+**/.git/
+**/.gitignore
+**/.DS_Store

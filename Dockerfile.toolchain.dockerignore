@@ -1,0 +1,9 @@
+# The toolchain build needs only the stage scripts and the pinned version list.
+# Sources come from a BuildKit cache mount, not from the context.
+
+*
+!images/toolchain/
+!packages/pkgs/versions.env
+
+**/.git/
+**/.DS_Store

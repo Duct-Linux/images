@@ -1,0 +1,157 @@
+# syntax=docker/dockerfile:1.7
+#
+# duct/chroot -- the target system, standing on its own.
+#
+# This is LFS's chroot step, expressed as a container. LFS has you mount /dev
+# and /proc and chroot into $LFS; Docker gives the same isolation by building an
+# image from that directory, with the advantage that the result is a reviewable
+# artifact rather than a mutable directory on the build host.
+#
+# From here on nothing from Debian is reachable. The compiler, the shell, the
+# libraries and the headers in this image were all produced by the cross
+# toolchain, and the real packages get built inside it.
+#
+#   docker buildx build -f docker/Dockerfile.chroot -t duct/chroot .
+
+ARG TOOLCHAIN=duct/toolchain:latest
+ARG BOOTSTRAP=duct/bootstrap:latest
+
+FROM ${BOOTSTRAP} AS tapebin
+
+FROM ${TOOLCHAIN} AS export
+
+USER root
+
+RUN set -eux; \
+    # The cross toolchain has done its job. Everything in /usr was built by it
+    # and no longer refers to it, so it goes -- and its absence is what proves
+    # the point: if anything still needed /duct/tools, the next stage fails.
+    rm -rf /duct/tools /duct/build; \
+    \
+    # The toolchain builds as an unprivileged user, so /duct is owned by uid
+    # 1000. A system image has to be root-owned.
+    chown -R 0:0 /duct; \
+    \
+    install -d -m 0755 /duct/dev /duct/proc /duct/sys /duct/run \
+                       /duct/home /duct/mnt /duct/opt /duct/srv \
+                       /duct/var/log /duct/var/cache /duct/var/lib; \
+    install -d -m 0750 /duct/root; \
+    install -d -m 1777 /duct/tmp /duct/var/tmp
+
+# The minimum /etc a build needs. Several configure scripts and test suites look
+# up the current user and fail in confusing ways when getpwuid returns nothing.
+# duct-filesystem ships the real versions of these; this is only enough to make
+# the chroot usable for building it.
+COPY --chmod=0644 <<'EOF' /duct/etc/passwd
+root:x:0:0:root:/root:/bin/bash
+nobody:x:65534:65534:Nobody:/nonexistent:/usr/bin/false
+EOF
+
+COPY --chmod=0644 <<'EOF' /duct/etc/group
+root:x:0:
+tty:x:5:
+nogroup:x:65534:
+EOF
+
+COPY --chmod=0644 <<'EOF' /duct/etc/nsswitch.conf
+passwd: files
+group: files
+shadow: files
+hosts: files dns
+EOF
+
+COPY --chmod=0644 <<'EOF' /duct/etc/ld.so.conf
+/usr/local/lib
+/usr/local/lib64
+/usr/lib
+/usr/lib64
+EOF
+
+# tape, so this image can build and index the real packages.
+#
+# These are the one thing here that Duct did not compile: tape is written in Go,
+# no Go compiler is packaged, so the binaries are cross-built in the bootstrap
+# image and copied in. They are statically linked with CGO_ENABLED=0, so they
+# depend on nothing in this image -- which is the only reason this is tolerable
+# rather than a hole in the bootstrap. Packaging Go is its own project.
+COPY --from=tapebin /usr/bin/tape /usr/bin/taped /usr/bin/tape-builder /usr/bin/tape-repo /duct/usr/bin/
+
+# ldconfig has never been run against this tree -- there are no install hooks
+# anywhere in the pipeline that could have done it, and the temp tools were
+# installed with DESTDIR from outside.
+RUN /duct/usr/sbin/ldconfig -r /duct 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+FROM scratch
+
+LABEL org.opencontainers.image.title="Duct chroot" \
+      org.opencontainers.image.description="Self-contained Duct system with a native toolchain, used to build the real packages"
+
+COPY --from=export /duct/ /
+
+ENV PATH=/usr/bin:/usr/sbin \
+    HOME=/root \
+    TZ=UTC \
+    LC_ALL=POSIX \
+    SHELL=/bin/bash \
+    DUCT_SRC_CACHE=/srccache \
+    VERSIONS=/duct-src/versions.env \
+    BUILD_ROOT=/build
+
+# ---------------------------------------------------------------------------
+# Additional temporary tools, LFS chapter 7.
+#
+# Everything above this line was cross-compiled from outside. Everything below
+# is built *by this system, for this system* -- a RUN in a FROM scratch stage is
+# exactly the chroot LFS asks you to enter, with the advantage that each step is
+# a cached layer instead of a mutable directory.
+#
+# These exist because the final packages need them and nothing so far provides
+# them. glibc is the blunt example: its configure aborts with
+#   "*** These critical programs are missing or too old: bison python"
+# so bison and python have to be here before a single real package can be built.
+# All of them are replaced by proper packages afterwards.
+# ---------------------------------------------------------------------------
+
+ARG DUCT_JOBS=4
+ENV DUCT_JOBS=${DUCT_JOBS}
+
+COPY packages/pkgs/versions.env /duct-src/versions.env
+COPY images/toolchain/common.sh images/toolchain/07-chroot-tools.sh /duct-src/toolchain/
+
+RUN --mount=type=cache,target=/srccache \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/07-chroot-tools.sh gettext && rm -rf /build
+
+RUN --mount=type=cache,target=/srccache \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/07-chroot-tools.sh bison && rm -rf /build
+
+RUN --mount=type=cache,target=/srccache \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/07-chroot-tools.sh perl && rm -rf /build
+
+RUN --mount=type=cache,target=/srccache \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/07-chroot-tools.sh python && rm -rf /build
+
+RUN --mount=type=cache,target=/srccache \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/07-chroot-tools.sh texinfo && rm -rf /build
+
+RUN --mount=type=cache,target=/srccache \
+    --mount=type=bind,from=ductsources,target=/hostsrc,ro \
+    /duct-src/toolchain/07-chroot-tools.sh util-linux && rm -rf /build
+
+# What the final builds actually depend on. Checked here rather than discovered
+# an hour into a package run.
+RUN set -eux; \
+    gcc --version | head -1; \
+    bison --version | head -1; \
+    python3 --version; \
+    perl --version | sed -n 2p; \
+    makeinfo --version | head -1; \
+    ldconfig -v >/dev/null 2>&1 || true
+
+WORKDIR /
+CMD ["/bin/bash"]
