@@ -20,7 +20,15 @@ PLATFORMS ?= linux/amd64,linux/arm64
 
 CONTEXT    := $(CURDIR)/..
 DOCKERFILE := $(CURDIR)/Dockerfile
-NAME       := $(if $(REGISTRY),$(REGISTRY)/,)$(IMAGE)
+# Local image names are always duct/<name>, matching every other image here
+# (duct/toolchain, duct/chroot, duct/base ...). REGISTRY is only for pushing.
+#
+# It used to be prepended to IMAGE, which already starts with "duct/", so any
+# build with REGISTRY set referred to ghcr.io/duct-linux/duct/bootstrap and
+# failed with "not found". Local builds never saw it because REGISTRY is empty
+# there; the CI bootstrap did, and had never been run until now.
+NAME       := $(IMAGE)
+REMOTE     := $(if $(REGISTRY),$(REGISTRY)/$(notdir $(IMAGE)),$(IMAGE))
 
 BUILD_ARGS = \
 	--build-arg DEBIAN_SNAPSHOT=$(DEBIAN_SNAPSHOT) \
@@ -155,7 +163,7 @@ build-multi: out
 
 push:
 	$(BUILDX) --platform $(PLATFORMS) --push \
-		-t $(NAME):$(TAG) -t $(NAME):latest $(CONTEXT)
+		-t $(REMOTE):$(TAG) -t $(REMOTE):latest $(CONTEXT)
 
 out:
 	mkdir -p $(CURDIR)/out
