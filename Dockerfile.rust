@@ -53,6 +53,22 @@ RUN --mount=type=bind,from=ductrust,target=/rustsrc,ro \
     rustc --version; \
     cargo --version
 
+# rustc's own build needs cmake and ninja for LLVM, pkg-config and openssl for
+# cargo, and python for x.py. All four are Duct packages now, so they come from
+# the repository rather than being imported: the only thing this image still
+# takes from outside is the bootstrap rustc itself.
+#
+# Without pkg-config specifically, cargo fails with "requires the `pkg-config`
+# utility to find OpenSSL" even when pkgconf is installed -- it ships under its
+# own name and nothing looks for that.
+RUN set -eux; \
+    taped & \
+    daemon_pid=$!; \
+    for i in $(seq 1 100); do [ -S /var/run/tape.sock ] && break; sleep 0.1; done; \
+    tape install -y cmake ninja openssl pkgconf python; \
+    kill "$daemon_pid" 2>/dev/null || true; \
+    cmake --version | head -1; ninja --version; pkg-config --version; openssl version
+
 # uutils' crates come from crates.io and are not vendored upstream, so cargo
 # needs a trust store. Duct has no ca-certificates package yet -- that means
 # packaging OpenSSL and a certificate set, which is its own decision. What
