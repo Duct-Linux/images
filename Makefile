@@ -30,7 +30,7 @@ BUILD_ARGS = \
 
 BUILDX = docker buildx build $(BUILD_ARGS) -f $(DOCKERFILE)
 
-.PHONY: build build-multi push shell test pins clean base base-test builder images-test have-repo toolchain chroot chroot-test rust
+.PHONY: build build-multi push shell test pins clean base base-test builder images-test have-repo toolchain chroot chroot-test rust go-image
 
 # ---------------------------------------------------------------------------
 # The cross toolchain. LFS chapter 5, built inside duct/bootstrap.
@@ -226,3 +226,23 @@ rust:
 		--build-arg CHROOT=$(CHROOT_IMAGE):latest \
 		--build-arg BOOTSTRAP=$(NAME):latest \
 		-t $(RUST_IMAGE):latest $(CONTEXT)
+
+# ---------------------------------------------------------------------------
+# The Go environment, used only for the go package itself.
+#
+# Go has had no C bootstrap path since 1.20: building the toolchain from source
+# needs a working Go, so a pinned upstream release is imported the same way
+# rustc is for uutils. Everything the package ships is then compiled by it.
+# ---------------------------------------------------------------------------
+
+GO_IMAGE   ?= duct/go
+GO_SOURCES ?= $(HOME)/.cache/duct/go
+
+go-image:
+	@test -d $(GO_SOURCES) || \
+		{ echo "no Go tarball at $(GO_SOURCES) -- fetch go<version>.linux-<arch>.tar.gz from go.dev/dl"; exit 1; }
+	docker buildx build -f $(CURDIR)/Dockerfile.go --load \
+		--build-context ductgo=$(GO_SOURCES) \
+		--build-arg BUILDER=$(BUILDER_IMAGE):latest \
+		--build-arg BOOTSTRAP=$(NAME):latest \
+		-t $(GO_IMAGE):latest $(CONTEXT)
