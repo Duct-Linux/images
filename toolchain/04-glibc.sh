@@ -44,10 +44,18 @@ echo "rootsbindir=/usr/sbin" >configparms
 # --host is the triple we are building *for*, --build the one we are on. Naming
 # both is what makes this a cross build rather than a native one that happens to
 # use a prefixed compiler.
+# --enable-kernel must match pkgs/glibc/build.sh. It is recorded in every
+# binary's .note.ABI-tag as the minimum kernel, so a mismatch means anything
+# built in duct/chroot differs from the same source built in duct/builder --
+# which is exactly what happened: the x86_64 packages were published straight
+# from the chroot and carry a 3.2.0 floor (glibc's default when the flag is
+# omitted) where the package set specifies 5.4.0. Two bytes, and the two
+# architectures stopped being equivalent.
 ../configure \
 	--prefix=/usr \
 	--host="$DUCT_TGT" \
 	--build="$(../scripts/config.guess)" \
+	--enable-kernel=5.4 \
 	--disable-nscd \
 	libc_cv_slibdir=/usr/lib
 
