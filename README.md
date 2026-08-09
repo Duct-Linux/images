@@ -193,6 +193,37 @@ libGL before it is written.
 compositor needs, and the manifest can carry the libraries, but a compositor
 and a shell are separate packages. An ISO built today boots to a console.
 
+### The desktop set
+
+```sh
+make iso DESKTOP=1
+```
+
+Adds 69 packages: seat and session management, input, KMS, GL through EGL, and
+the full GTK 4 stack.
+
+**This is a GTK 4 application platform, not a GNOME session.** There is no
+compositor and no shell in it. An ISO built this way boots to a console exactly
+as the default one does. What it adds is everything a graphical program needs
+*underneath* — a GTK program will build, run and draw on it the moment a
+compositor exists, and nothing in the list provides one. Do not describe the
+result as a GNOME live image.
+
+Not the default, deliberately: the default ISO is the toolchain and a shell,
+which is what the distribution is today, and the desktop set roughly quadruples
+its size for a capability nothing yet uses.
+
+Two things follow from it that are worth knowing before they surprise anyone:
+
+- `shadow` and `linux-pam` arrive with it, so `duct-live`'s console session
+  starts taking the `login(1)` branch instead of the fallback. That is the
+  point — `login` runs PAM, PAM runs `pam_elogind`, and `pam_elogind` is the
+  only thing that creates `/run/user/<uid>`. Without it a Wayland socket has
+  nowhere to live. The fallback prints exactly which two packages are missing,
+  which is how it documents its own fix.
+- There is still no `libGL.so` — see *Known absences* below. Mesa is
+  `-Dglx=disabled`, so GL is reachable through EGL only.
+
 ### Adding a desktop, or anything else
 
 The package manifest is one variable:

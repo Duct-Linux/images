@@ -198,7 +198,46 @@ ISO_KEY_DIR ?= $(CONTEXT)/packages/out/keys
 # store itself, because fetching it is what needs one.
 ISO_BASE_PACKAGES  ?= $(BUILDER_PACKAGES) ca-certificates
 ISO_BOOT_PACKAGES  ?= bc elfutils busybox kmod util-linux linux grub duct-live
-ISO_EXTRA_PACKAGES ?=
+
+# The desktop package set, built with `make iso DESKTOP=1`.
+#
+# THIS IS A GTK 4 APPLICATION PLATFORM, NOT A GNOME SESSION. There is no
+# compositor and no shell in it. An ISO built this way boots to a console
+# exactly as the default one does; what it adds is everything a graphical
+# program needs underneath -- seat and session management, input, KMS, GL
+# through EGL, and the full GTK 4 stack. A GTK program will build, run and
+# draw on it the moment a compositor exists. Nothing in this list provides
+# one.
+#
+# Not the default, deliberately. The default ISO is the toolchain and a
+# shell, which is what the distribution is today; this quadruples its size
+# for a capability nothing yet uses.
+#
+# Ordering here is irrelevant -- tape resolves what to install and in what
+# order. The list is grouped by what each part is for, so that a reader can
+# tell which entries belong together and which could be dropped.
+ISO_DESKTOP_PACKAGES ?= \
+	libxml2 libxcrypt attr acl libcap expat libffi pcre2 \
+	linux-pam shadow eudev dbus elogind \
+	iso-codes xkeyboard-config hwdata \
+	libXau libXdmcp libxcb libX11 libXext libXrender libXfixes libXdamage \
+	libXcomposite libXrandr libXi libXinerama libXcursor libXtst \
+	libpciaccess libdrm \
+	wayland mtdev libevdev libinput libxkbcommon \
+	llvm mesa \
+	libpng brotli freetype fontconfig fribidi pixman \
+	glib gobject-introspection glib-introspection \
+	harfbuzz cairo pango \
+	libjpeg-turbo libtiff libwebp \
+	shared-mime-info desktop-file-utils hicolor-icon-theme \
+	gdk-pixbuf graphene libepoxy libyaml curl libxmlb appstream \
+	gsettings-desktop-schemas gtk4 libadwaita adwaita-icon-theme \
+	cantarell-fonts
+
+# `make iso DESKTOP=1` is the whole of what adding the set costs. Naming it
+# rather than making callers paste 69 package names means the list is
+# reviewable in one place and cannot drift between whoever last ran it.
+ISO_EXTRA_PACKAGES ?= $(if $(DESKTOP),$(ISO_DESKTOP_PACKAGES),)
 ISO_PACKAGES       ?= $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES) $(ISO_EXTRA_PACKAGES)
 
 # The kernel is only ever built for one architecture at a time, and an ISO is
