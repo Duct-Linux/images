@@ -157,6 +157,21 @@ in a QEMU invocation without firmware. `make iso-run` requires `OVMF=`, and a
 plain `qemu-system-x86_64 -cdrom` shows a blank screen — which is the expected
 result, not a fault.
 
+### Known absences, so they are not filed as bugs
+
+**There is no `libGL.so`.** Mesa is built `-Dglx=disabled`, so desktop GL is
+reachable only through EGL. That is correct for the target — a Wayland session
+renders through EGL and GLES — but anything that links `-lGL` directly will not
+run until Xwayland or libglvnd is packaged. A consequence of the Wayland-first
+decision rather than a defect, and the answer to the bug report about a missing
+libGL before it is written.
+
+**No BIOS boot.** See below.
+
+**No graphical session.** The kernel carries the DRM/KMS and input drivers a
+compositor needs, and the manifest can carry the libraries, but a compositor
+and a shell are separate packages. An ISO built today boots to a console.
+
 ### Adding a desktop, or anything else
 
 The package manifest is one variable:
