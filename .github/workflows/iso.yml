@@ -1,0 +1,122 @@
+name: live iso
+
+# Builds duct-live-<arch>.iso from the published repository and attaches it to
+# the run as an artifact.
+#
+# Same argument as assemble.yml: building from repo.duct.dss-net.de rather than
+# from a local tree means the ISO is assembled the way a user's machine would
+# be, from the same signed index and the same digests. It also makes this a
+# test of the publish -- a package that is in the recipe set but missing from
+# the repository fails here, loudly, instead of producing an ISO that boots to
+# an initramfs shell.
+#
+# Unlike the images, an ISO is architecture-specific all the way down: it
+# contains one kernel and one bootloader, and there is no manifest to combine
+# two of them into. Each architecture produces its own file.
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [repository-published]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io/duct-linux
+  REPO_URL: https://repo.duct.dss-net.de
+
+  # The builder set, plus what it takes to boot. Written out rather than
+  # resolved by tape so that the contents of the ISO are a reviewable decision
+  # -- the same reason assemble.yml lists its packages.
+  #
+  # ca-certificates for the same reason it is in the base image: without a
+  # trust store the tape on the ISO cannot complete a TLS handshake, so a live
+  # system could never install anything from the repository it came from.
+  ISO_PACKAGES: >-
+    duct-filesystem ca-certificates linux-headers glibc zlib gmp mpfr mpc
+    binutils gcc ncurses bash uutils-coreutils tape
+    m4 bison flex make gawk sed grep findutils diffutils
+    tar gzip xz bzip2 patch file pkgconf perl texinfo
+    bc elfutils busybox kmod util-linux linux grub duct-live
+
+jobs:
+  iso:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64  }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # An architecture exists only once its bootstrap has published one.
+      # Skipping is the right response rather than failing: until the x86_64
+      # bootstrap has run there is nothing to build an ISO from.
+      - id: have
+        run: |
+          if docker manifest inspect "$REGISTRY/bootstrap:${{ matrix.arch }}" >/dev/null 2>&1; then
+            echo "yes=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::notice::no bootstrap image for ${{ matrix.arch }}; skipping"
+            echo "yes=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.have.outputs.yes == 'true'
+        with: { path: images }
+      # For server/duct.key.pub, the trust anchor. Taken from the packages repo
+      # rather than copied here so there is one source of truth for it.
+      - uses: actions/checkout@v4
+        if: steps.have.outputs.yes == 'true'
+        with: { repository: Duct-Linux/packages, path: packages }
+
+      - name: Check the repository is serving
+        if: steps.have.outputs.yes == 'true'
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null "$REPO_URL/repo.db"
+          curl -fsS -o /dev/null "$REPO_URL/repo.db.sig"
+          echo "repository is serving an index and a signature"
+
+      - name: Build
+        if: steps.have.outputs.yes == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # ductrepo is required by the Dockerfile but never read when REPO_URL
+          # is an https:// address -- the repository is bind-mounted into the
+          # install step and that step downloads instead. An empty directory is
+          # the honest thing to pass.
+          mkdir -p empty-repo
+          docker buildx build -f images/Dockerfile.iso \
+            --build-context ductrepo=empty-repo \
+            --build-context ductkey=packages/server \
+            --build-arg BOOTSTRAP="$REGISTRY/bootstrap:${{ matrix.arch }}" \
+            --build-arg REPO_URL="$REPO_URL" \
+            --build-arg PACKAGES="$ISO_PACKAGES" \
+            --output type=local,dest=out \
+            .
+          mv out/duct-live.iso "out/duct-live-${{ matrix.arch }}.iso"
+          ls -l out
+
+      # The headers, which cost nothing and catch a mis-authored image.
+      - name: Check the image
+        if: steps.have.outputs.yes == 'true'
+        run: make -C images iso-test ISO_OUT="$PWD/out" ISO_ARCH=${{ matrix.arch }}
+
+      # The check that is not a proxy for anything: boot it. Runs on the
+      # native architecture, so it is only emulated in the sense that there is
+      # no KVM on a GitHub runner by default.
+      - name: Boot it
+        if: steps.have.outputs.yes == 'true'
+        run: make -C images iso-boot-test ISO_OUT="$PWD/out" ISO_ARCH=${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        if: steps.have.outputs.yes == 'true'
+        with:
+          name: duct-live-${{ matrix.arch }}
+          path: out/duct-live-${{ matrix.arch }}.iso
+          # An ISO is large and this is not an archive; keep it long enough to
+          # download and test, not forever.
+          retention-days: 14

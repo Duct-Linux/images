@@ -1,0 +1,45 @@
+# The live ISO's boot menu. @SERIAL@ is replaced with the architecture's
+# serial device by build-iso.sh.
+
+set default=0
+set timeout=10
+
+# No gfxterm and no font: grub-mkfont is not built (it needs freetype, which is
+# not packaged), so there is no font file to load and a gfxterm that cannot
+# find one shows nothing at all. The firmware's own console is text, works
+# everywhere, and is what an EFI machine gives us for free.
+terminal_output console
+
+menuentry 'Duct Linux (live)' {
+	# Two consoles, and the order is the point. Every console= gets kernel
+	# messages, but /dev/console -- which is where init puts its shell --
+	# follows the last one that actually registered. Listing serial first and
+	# tty0 second means a machine with a display puts the shell on the screen,
+	# and a machine without one (a headless server, QEMU with -nographic)
+	# falls back to the serial port rather than to nothing.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200 console=tty0
+	initrd /boot/initramfs.img
+}
+
+menuentry 'Duct Linux (live, verbose boot)' {
+	# ignore_loglevel puts every kernel message on the console, and
+	# duct.live.debug turns on `set -x` in the initramfs. This is the entry to
+	# choose when the first one reaches the initramfs shell.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200 console=tty0 ignore_loglevel duct.live.debug
+	initrd /boot/initramfs.img
+}
+
+menuentry 'Duct Linux (live, serial console only)' {
+	# For a machine being driven entirely over a serial line: tty0 is left out
+	# so /dev/console cannot land on a display nobody is looking at.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200
+	initrd /boot/initramfs.img
+}
+
+menuentry 'Reboot' {
+	reboot
+}
+
+menuentry 'Shut down' {
+	halt
+}
