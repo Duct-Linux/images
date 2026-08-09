@@ -369,22 +369,25 @@ RUST_IMAGE ?= duct/rust
 # no business in the main context.
 RUST_SOURCES ?= $(HOME)/.cache/duct/rust
 
+# BUILDER, not CHROOT. Dockerfile.rust builds FROM the BUILDER argument and
+# declares no CHROOT at all, so the CHROOT build-arg this target used to pass
+# was silently discarded -- buildx does not complain about a build-arg the
+# Dockerfile never declares.
+#
+# It looked correct and worked anyway, because BUILDER's default is the
+# published builder image and that is a reasonable base. What it was not was
+# retargetable: anyone pointing this at a different image would have watched
+# their argument have no effect whatsoever.
+#
+# Passing BUILDER also brings this target in line with every other one here,
+# which build against the locally built images rather than the published ones.
+#
+# The comment lives outside the recipe deliberately: make expands variables in
+# recipe lines, so a ${BUILDER} written inside one is echoed as an empty string
+# and the explanation contradicts itself.
 rust:
 	@test -d $(RUST_SOURCES) || \
 		{ echo "no Rust tarball at $(RUST_SOURCES) -- see docker/README.md"; exit 1; }
-	# BUILDER, not CHROOT. Dockerfile.rust builds `FROM ${BUILDER}` and has no
-	# CHROOT argument at all, so the CHROOT build-arg this target used to pass
-	# was silently discarded -- buildx does not complain about a build-arg the
-	# Dockerfile never declares.
-	#
-	# It looked correct and worked anyway, because BUILDER's default is the
-	# published builder image and that is a reasonable base. What it was not
-	# was retargetable: someone pointing this at a different chroot would have
-	# watched their argument have no effect whatsoever.
-	#
-	# Passing BUILDER also brings this target in line with every other one
-	# here, which build against the locally built images rather than the
-	# published ones.
 	docker buildx build -f $(CURDIR)/Dockerfile.rust --load \
 		--build-context ductrust=$(RUST_SOURCES) \
 		--build-context ductpkgs=$(CONTEXT)/packages/out/pkgs \
