@@ -11,13 +11,27 @@ set timeout=10
 terminal_output console
 
 menuentry 'Duct Linux (live)' {
-	# Two consoles, and the order is the point. Every console= gets kernel
-	# messages, but /dev/console -- which is where init puts its shell --
-	# follows the last one that actually registered. Listing serial first and
-	# tty0 second means a machine with a display puts the shell on the screen,
-	# and a machine without one (a headless server, QEMU with -nographic)
-	# falls back to the serial port rather than to nothing.
-	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200 console=tty0
+	# Two consoles, and the ORDER IS LOAD-BEARING. Every console= receives
+	# kernel messages, but /dev/console -- where init puts its shell, and where
+	# the initramfs writes everything it has to say -- follows the LAST one
+	# listed.
+	#
+	# tty0 first, serial last. The reverse looks more natural ("prefer the
+	# screen, fall back to serial") and is wrong, because tty0 does not fail to
+	# register on a machine with no display: CONFIG_VT=y always installs a
+	# dummy console driver, so tty0 exists and quietly discards everything
+	# written to it. A headless boot then produces no output at all after the
+	# kernel's own messages stop.
+	#
+	# This is not theoretical. It is what the first QEMU boot of this ISO did:
+	# the kernel came up, the initramfs found the medium, mounted the squashfs
+	# through a loop device and stacked the overlay -- all visible as kernel
+	# messages -- and not one line of the initramfs's own output ever appeared,
+	# because it was going to the dummy tty0.
+	#
+	# In this order a machine with a serial port puts the shell there, and one
+	# without falls back to tty0 and the screen.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200
 	initrd /boot/initramfs.img
 }
 
@@ -25,7 +39,7 @@ menuentry 'Duct Linux (live, verbose boot)' {
 	# ignore_loglevel puts every kernel message on the console, and
 	# duct.live.debug turns on `set -x` in the initramfs. This is the entry to
 	# choose when the first one reaches the initramfs shell.
-	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200 console=tty0 ignore_loglevel duct.live.debug
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200 ignore_loglevel duct.live.debug
 	initrd /boot/initramfs.img
 }
 

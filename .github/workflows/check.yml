@@ -1,0 +1,104 @@
+name: check
+
+# The cheap checks, on every pull request.
+#
+# Building an ISO takes tens of minutes and needs a published repository, so it
+# stays on workflow_dispatch like the other workflows here. But a pull request
+# with no checks at all is indistinguishable from one whose checks all passed,
+# and that is a poor default for the repository that produces the thing people
+# boot. These run in well under a minute and catch the mistakes that are
+# actually easy to make in this tree.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every script here runs somewhere awkward -- inside a chroot of a
+      # half-built rootfs, or as the first process a kernel starts -- where a
+      # syntax error surfaces as an unbootable image rather than an error
+      # message.
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in iso/*.sh; do
+            [ -e "$f" ] || continue
+            if head -n1 "$f" | grep -q bash; then shell=bash; else shell=sh; fi
+            if ! $shell -n "$f"; then echo "::error file=$f::syntax error"; fail=1; fi
+          done
+          # The initramfs init is POSIX sh: it runs under busybox ash, which is
+          # not bash, so checking it with bash would accept things that fail at
+          # boot. There is no copy of it here -- it lives in the duct-live
+          # package -- but the grub config templates are ours.
+          exit $fail
+
+      - name: Workflow syntax
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys, yaml, pathlib
+          bad = 0
+          for p in sorted(pathlib.Path('.github/workflows').glob('*.yml')):
+              try:
+                  yaml.safe_load(p.read_text())
+              except Exception as e:
+                  print(f"::error file={p}::{e}")
+                  bad = 1
+          sys.exit(bad)
+          PY
+
+      # The three constants the boot path is built from appear in more than one
+      # file and have to agree. They cannot be shared as variables -- one is
+      # compiled into a GRUB binary, one is a kernel command line, one is a
+      # shell default in another repository's package -- so the only thing that
+      # can keep them in step is a check.
+      #
+      # A mismatch here does not fail the ISO build. It produces an ISO that
+      # boots as far as the initramfs and then cannot find its own root
+      # filesystem, which is a miserable thing to debug from a QEMU console.
+      - name: Boot-path constants agree
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # The marker GRUB searches for must be the file make-boot.sh writes.
+          grep -q '/duct/.duct-live' iso/early-grub.cfg \
+            || { echo "::error file=iso/early-grub.cfg::does not search for /duct/.duct-live"; fail=1; }
+          grep -q 'duct/.duct-live' iso/make-boot.sh \
+            || { echo "::error file=iso/make-boot.sh::does not create /duct/.duct-live"; fail=1; }
+
+          # The label the kernel command line passes must be the one the ISO is
+          # authored with. ISO_VOLID in the Makefile is the source of truth.
+          volid=$(sed -n 's/^ISO_VOLID *?*= *//p' Makefile | head -1)
+          [ -n "$volid" ] || { echo "::error file=Makefile::ISO_VOLID not found"; fail=1; }
+          grep -q "duct.live.label=$volid" iso/grub.cfg.in \
+            || { echo "::error file=iso/grub.cfg.in::does not boot with duct.live.label=$volid"; fail=1; }
+
+          # The squashfs path build-iso.sh writes must be the one the initramfs
+          # looks for. The initramfs default lives in the duct-live package, so
+          # this checks our half against the documented value.
+          grep -q 'duct/rootfs.squashfs' iso/build-iso.sh \
+            || { echo "::error file=iso/build-iso.sh::does not write duct/rootfs.squashfs"; fail=1; }
+
+          # Console ordering. /dev/console follows the LAST console= on the
+          # command line, and CONFIG_VT=y means tty0 always registers even with
+          # no display -- so tty0 last silently sends every boot message to a
+          # dummy device. That is not a hypothetical: it is what the first QEMU
+          # boot of this ISO did, and it looked exactly like a hang.
+          if grep -qE 'linux .*console=[^ ]*serial[^ ]*.*console=tty0|linux .*console=tty(S0|AMA0)[^ ]*.*console=tty0' iso/grub.cfg.in; then
+            echo "::error file=iso/grub.cfg.in::console=tty0 must not be last; /dev/console would be the dummy VT on a headless machine"
+            fail=1
+          fi
+
+          [ "$fail" -eq 0 ] && echo "boot-path constants agree"
+          exit $fail
