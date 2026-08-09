@@ -157,6 +157,42 @@ in a QEMU invocation without firmware. `make iso-run` requires `OVMF=`, and a
 plain `qemu-system-x86_64 -cdrom` shows a blank screen — which is the expected
 result, not a fault.
 
+### The coreutils are uutils, and they do not behave like GNU's
+
+Duct ships `uutils-coreutils`, a Rust reimplementation. It is a drop-in
+replacement for what the commands *do*, and not always for how they behave when
+something goes wrong.
+
+The instance that cost real time: `cp -a` copying a tree over a live root
+filesystem hit `/usr/bin/bash` — the shell running the command — and failed with
+`ETXTBSY`. GNU `cp` reports such an error and carries on with the remaining
+files. uutils' `cp` **stops**. So one busy file silently abandoned everything
+after it, and the build failed several minutes later on a missing program that
+had been copied successfully in every earlier test.
+
+The tell is the error text: `Device or resource busy (os error 16)` is a Rust
+errno, not a GNU one.
+
+Assume this generalises. `mv`, `rm`, `install` and the rest are the same
+implementation, and any reasoning that starts "GNU coreutils would carry on
+here" is unsafe in this tree. Where a command's partial success matters, assert
+the result rather than trusting the exit status.
+
+### Known absences, so they are not filed as bugs
+
+**There is no `libGL.so`.** Mesa is built `-Dglx=disabled`, so desktop GL is
+reachable only through EGL. That is correct for the target — a Wayland session
+renders through EGL and GLES — but anything that links `-lGL` directly will not
+run until Xwayland or libglvnd is packaged. A consequence of the Wayland-first
+decision rather than a defect, and the answer to the bug report about a missing
+libGL before it is written.
+
+**No BIOS boot.** See below.
+
+**No graphical session.** The kernel carries the DRM/KMS and input drivers a
+compositor needs, and the manifest can carry the libraries, but a compositor
+and a shell are separate packages. An ISO built today boots to a console.
+
 ### Adding a desktop, or anything else
 
 The package manifest is one variable:

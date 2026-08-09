@@ -144,6 +144,18 @@ install -m 0644 "$rootfs/tmp/$efi_name" "$isoroot/EFI/BOOT/$efi_name"
 cp "$rootfs/usr/lib/grub/$grub_target"/*.mod "$isoroot/boot/grub/$grub_target/" 2>/dev/null || true
 cp "$rootfs/usr/lib/grub/$grub_target"/*.lst "$isoroot/boot/grub/$grub_target/" 2>/dev/null || true
 
+# Both copies tolerate failure, because the .lst glob legitimately matches
+# nothing on some GRUB builds -- but "tolerates failure" and "produced nothing"
+# have to be told apart. A module directory that silently came out empty gives
+# an ISO that builds, boots, and then strands anyone who reaches the GRUB
+# prompt with a shell that can barely do anything.
+#
+# The count is the assertion. GRUB ships over two hundred modules; zero means
+# the copy did not happen, whatever the reason.
+mods=$(find "$isoroot/boot/grub/$grub_target" -name '*.mod' | wc -l)
+[ "$mods" -gt 0 ] || die "no GRUB modules were copied from $rootfs/usr/lib/grub/$grub_target"
+log "copied $mods GRUB modules"
+
 sed -e "s/@SERIAL@/$serial/g" "$templates/grub.cfg.in" >"$isoroot/boot/grub/grub.cfg"
 chmod 0644 "$isoroot/boot/grub/grub.cfg"
 
