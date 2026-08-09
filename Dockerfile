@@ -121,6 +121,15 @@ COPY --from=tape /src/bin/tape-builder  /usr/bin/tape-builder
 COPY --from=tape /src/bin/tape-repo     /usr/bin/tape-repo
 COPY --from=tape /src/common/config/sample_config.toml /etc/tape/config.toml.sample
 
+# Marks these binaries as freshly compiled from the tape source, as opposed to
+# the ones any assembled Duct image carries in the same place.
+#
+# The tape package copies from /usr/bin, and duct/builder has a /usr/bin/tape
+# too -- the one from the last published package. Building the recipe there
+# repackaged that old binary and published it under a new subversion, which
+# looked exactly like a successful release. The recipe now requires this.
+ENV DUCT_TAPE_FROM_SOURCE=1
+
 RUN set -eux; \
     install -d /etc/tape/repos /etc/tape/keys /var/cache/tape/repos /var/lib/tape; \
     groupadd -g 1000 builder; \
