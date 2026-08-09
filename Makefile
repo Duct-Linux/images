@@ -372,10 +372,23 @@ RUST_SOURCES ?= $(HOME)/.cache/duct/rust
 rust:
 	@test -d $(RUST_SOURCES) || \
 		{ echo "no Rust tarball at $(RUST_SOURCES) -- see docker/README.md"; exit 1; }
+	# BUILDER, not CHROOT. Dockerfile.rust builds `FROM ${BUILDER}` and has no
+	# CHROOT argument at all, so the CHROOT build-arg this target used to pass
+	# was silently discarded -- buildx does not complain about a build-arg the
+	# Dockerfile never declares.
+	#
+	# It looked correct and worked anyway, because BUILDER's default is the
+	# published builder image and that is a reasonable base. What it was not
+	# was retargetable: someone pointing this at a different chroot would have
+	# watched their argument have no effect whatsoever.
+	#
+	# Passing BUILDER also brings this target in line with every other one
+	# here, which build against the locally built images rather than the
+	# published ones.
 	docker buildx build -f $(CURDIR)/Dockerfile.rust --load \
 		--build-context ductrust=$(RUST_SOURCES) \
 		--build-context ductpkgs=$(CONTEXT)/packages/out/pkgs \
-		--build-arg CHROOT=$(CHROOT_IMAGE):latest \
+		--build-arg BUILDER=$(BUILDER_IMAGE):latest \
 		--build-arg BOOTSTRAP=$(NAME):latest \
 		-t $(RUST_IMAGE):latest $(CONTEXT)
 
