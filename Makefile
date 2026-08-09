@@ -38,7 +38,7 @@ BUILD_ARGS = \
 
 BUILDX = docker buildx build $(BUILD_ARGS) -f $(DOCKERFILE)
 
-.PHONY: build build-multi push shell test pins clean base base-test builder images-test have-repo toolchain chroot chroot-test rust go-image
+.PHONY: build build-multi push shell test pins clean base base-test builder images-test have-repo toolchain chroot chroot-test rust go-image iso iso-test iso-boot-test iso-run
 
 # ---------------------------------------------------------------------------
 # The cross toolchain. LFS chapter 5, built inside duct/bootstrap.
@@ -147,6 +147,150 @@ base-test:
 		docker exec $$cid /usr/bin/tape ping >/dev/null 2>&1 && break; sleep 0.2; \
 	done; \
 	docker exec $$cid /usr/bin/tape list 2>&1 | grep -v INFO
+
+# ---------------------------------------------------------------------------
+# The live ISO.
+#
+# Unlike duct/base, this is assembled from the *local* signed repository rather
+# than the published one. That is not a shortcut: an ISO is normally built from
+# packages that have just been built and not yet published, and building one
+# should not require a network at all. Point REPO_URL at the server to build
+# the published set instead.
+# ---------------------------------------------------------------------------
+
+# macOS calls arm64 what Linux calls aarch64, and the package archives, the
+# kernel and the GRUB target all use the Linux spelling.
+HOST_ARCH := $(shell uname -m)
+ifeq ($(HOST_ARCH),arm64)
+HOST_ARCH := aarch64
+endif
+
+ISO_NAME     ?= duct-live
+ISO_VOLID    ?= DUCT_LIVE
+# zstd, not xz: a live root filesystem is decompressed continuously for as long
+# as the system runs, and zstd reads about three times faster for 8% more size.
+ISO_COMP     ?= zstd
+ISO_REPO_URL ?= /repo
+ISO_OUT      ?= $(CURDIR)/out
+
+LOCAL_REPO := $(CONTEXT)/packages/out/repo
+
+# The public half of whichever key signed the repository above. The local repo
+# is signed with the key `make -C ../packages key` generated, not with the
+# production one in packages/server -- so this has to follow ISO_REPO_URL.
+ISO_KEY_DIR ?= $(CONTEXT)/packages/out/keys
+
+# The package set that ends up on the ISO.
+#
+# The builder set, plus what it takes to boot: a kernel, a bootloader, the
+# static busybox the initramfs is made of, module and mount tools, and the
+# live system's own init wiring.
+#
+# Kept as one overridable variable because this is the seam a desktop package
+# set is layered in through -- `make iso ISO_EXTRA_PACKAGES="..."` should be
+# the whole of what adding one costs.
+#
+# ca-certificates is here rather than in BASE_PACKAGES because that variable
+# decides what goes into duct/base and this is not the place to change that.
+# It is not optional for an ISO: without a trust store, the tape on the live
+# system cannot complete a TLS handshake, so it could never install anything
+# from the repository the ISO was built from -- and it cannot fetch the trust
+# store itself, because fetching it is what needs one.
+ISO_BASE_PACKAGES  ?= $(BUILDER_PACKAGES) ca-certificates
+ISO_BOOT_PACKAGES  ?= bc elfutils busybox kmod util-linux linux grub duct-live
+ISO_EXTRA_PACKAGES ?=
+ISO_PACKAGES       ?= $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES) $(ISO_EXTRA_PACKAGES)
+
+# The kernel is only ever built for one architecture at a time, and an ISO is
+# bootable on exactly one. Naming the file after the machine that built it
+# keeps two of them from overwriting each other in out/.
+ISO_ARCH  ?= $(HOST_ARCH)
+ISO_FILE  ?= $(ISO_NAME)-$(ISO_ARCH).iso
+
+iso: have-repo | out
+	docker buildx build -f $(CURDIR)/Dockerfile.iso \
+		--build-context ductrepo=$(LOCAL_REPO) \
+		--build-context ductkey=$(ISO_KEY_DIR) \
+		--build-arg BOOTSTRAP=$(NAME):latest \
+		--build-arg DEBIAN_DIGEST=$(DEBIAN_DIGEST) \
+		--build-arg DEBIAN_SNAPSHOT=$(DEBIAN_SNAPSHOT) \
+		--build-arg SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
+		--build-arg REPO_URL=$(ISO_REPO_URL) \
+		--build-arg VOLID=$(ISO_VOLID) \
+		--build-arg COMPRESSION=$(ISO_COMP) \
+		--build-arg PACKAGES="$(ISO_PACKAGES)" \
+		--output type=local,dest=$(ISO_OUT) \
+		$(CONTEXT)
+	@mv $(ISO_OUT)/duct-live.iso $(ISO_OUT)/$(ISO_FILE)
+	@echo "==> wrote out/$(ISO_FILE)"
+
+# What can be checked without booting, using nothing but dd.
+#
+# Reading the image's own headers rather than asking xorriso keeps this
+# runnable anywhere -- no container, no tools that are only installed inside
+# the ISO build -- and it checks the three things that actually decide whether
+# a machine will boot this file:
+#
+#   the volume id      the initramfs finds the medium by searching for it, so
+#                      an ISO whose label does not match what grub.cfg puts on
+#                      the kernel command line boots as far as the initramfs
+#                      and then stops
+#   El Torito          the boot record at sector 17, without which UEFI
+#                      firmware will not look for a boot image at all
+#   the GPT            what firmware reads instead when the same bytes have
+#                      been written to a USB stick
+iso-test:
+	@set -eu; \
+	iso=$(ISO_OUT)/$(ISO_FILE); \
+	test -f "$$iso" || { echo "no $$iso -- run: make iso"; exit 1; }; \
+	fail=0; \
+	printf 'ISO      %s (%s bytes)\n' "$$iso" "$$(wc -c <"$$iso" | tr -d ' ')"; \
+	volid=$$(dd if="$$iso" bs=1 skip=32808 count=32 2>/dev/null | tr -d '\0' | sed 's/ *$$//'); \
+	printf 'volume   %s' "$$volid"; \
+	if [ "$$volid" = "$(ISO_VOLID)" ]; then echo "  ok"; \
+	else echo "  MISMATCH (grub.cfg boots $(ISO_VOLID))"; fail=1; fi; \
+	if dd if="$$iso" bs=2048 skip=17 count=1 2>/dev/null | grep -q "EL TORITO SPECIFICATION"; then \
+		echo "eltorito boot record present  ok"; \
+	else echo "eltorito boot record MISSING"; fail=1; fi; \
+	if dd if="$$iso" bs=512 skip=1 count=1 2>/dev/null | grep -q "EFI PART"; then \
+		echo "gpt      present  ok"; \
+	else echo "gpt      MISSING (a USB stick written from this will not boot)"; fail=1; fi; \
+	test "$$fail" -eq 0 || { echo "iso-test FAILED"; exit 1; }; \
+	echo "iso-test OK"
+
+# The check that is not a proxy for anything: boot the thing and wait for the
+# live system to report that it is up. Everything the ISO build produces is on
+# that path -- bootloader, kernel, initramfs, overlay, PID 1 -- and every one
+# of them can fail in a way the image's headers look fine after.
+#
+# QEMU runs in a container, so this needs nothing installed on the host. It is
+# emulated and therefore slow; BOOT_TIMEOUT=<seconds> if it needs longer.
+iso-boot-test:
+	@set -eu; \
+	iso=$(ISO_OUT)/$(ISO_FILE); \
+	test -f "$$iso" || { echo "no $$iso -- run: make iso"; exit 1; }; \
+	$(CURDIR)/iso/boot-test.sh "$$iso" $(ISO_ARCH)
+
+# Boot it interactively, with qemu on the host. Needs an EDK2 firmware image:
+# an EFI-only ISO has nothing for a BIOS to run, so `qemu-system-x86_64`
+# without -bios OVMF shows a blank screen and that is the expected behaviour,
+# not a bug.
+#
+#   make iso-run OVMF=/path/to/OVMF.fd
+QEMU_MEM ?= 2048
+iso-run:
+	@set -eu; \
+	iso=$(ISO_OUT)/$(ISO_FILE); \
+	test -f "$$iso" || { echo "no $$iso -- run: make iso"; exit 1; }; \
+	test -n "$(OVMF)" || { echo "set OVMF=/path/to/edk2 firmware"; exit 1; }; \
+	drive="-drive if=none,id=live,file=$$iso,format=raw,readonly=on -device virtio-blk-pci,drive=live"; \
+	case "$(ISO_ARCH)" in \
+	  aarch64) qemu-system-aarch64 -M virt -cpu max -m $(QEMU_MEM) \
+	             -bios "$(OVMF)" $$drive -nographic ;; \
+	  x86_64)  qemu-system-x86_64 -M q35 -cpu max -m $(QEMU_MEM) \
+	             -bios "$(OVMF)" $$drive -nographic ;; \
+	  *) echo "no qemu invocation for $(ISO_ARCH)"; exit 1 ;; \
+	esac
 
 # Native platform, loaded into the local daemon. This is the one you use.
 build:

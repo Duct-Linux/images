@@ -1,0 +1,59 @@
+# The live ISO's boot menu. @SERIAL@ is replaced with the architecture's
+# serial device by build-iso.sh.
+
+set default=0
+set timeout=10
+
+# No gfxterm and no font: grub-mkfont is not built (it needs freetype, which is
+# not packaged), so there is no font file to load and a gfxterm that cannot
+# find one shows nothing at all. The firmware's own console is text, works
+# everywhere, and is what an EFI machine gives us for free.
+terminal_output console
+
+menuentry 'Duct Linux (live)' {
+	# Two consoles, and the ORDER IS LOAD-BEARING. Every console= receives
+	# kernel messages, but /dev/console -- where init puts its shell, and where
+	# the initramfs writes everything it has to say -- follows the LAST one
+	# listed.
+	#
+	# tty0 first, serial last. The reverse looks more natural ("prefer the
+	# screen, fall back to serial") and is wrong, because tty0 does not fail to
+	# register on a machine with no display: CONFIG_VT=y always installs a
+	# dummy console driver, so tty0 exists and quietly discards everything
+	# written to it. A headless boot then produces no output at all after the
+	# kernel's own messages stop.
+	#
+	# This is not theoretical. It is what the first QEMU boot of this ISO did:
+	# the kernel came up, the initramfs found the medium, mounted the squashfs
+	# through a loop device and stacked the overlay -- all visible as kernel
+	# messages -- and not one line of the initramfs's own output ever appeared,
+	# because it was going to the dummy tty0.
+	#
+	# In this order a machine with a serial port puts the shell there, and one
+	# without falls back to tty0 and the screen.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200
+	initrd /boot/initramfs.img
+}
+
+menuentry 'Duct Linux (live, verbose boot)' {
+	# ignore_loglevel puts every kernel message on the console, and
+	# duct.live.debug turns on `set -x` in the initramfs. This is the entry to
+	# choose when the first one reaches the initramfs shell.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200 ignore_loglevel duct.live.debug
+	initrd /boot/initramfs.img
+}
+
+menuentry 'Duct Linux (live, serial console only)' {
+	# For a machine being driven entirely over a serial line: tty0 is left out
+	# so /dev/console cannot land on a display nobody is looking at.
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200
+	initrd /boot/initramfs.img
+}
+
+menuentry 'Reboot' {
+	reboot
+}
+
+menuentry 'Shut down' {
+	halt
+}

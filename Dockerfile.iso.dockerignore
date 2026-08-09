@@ -1,0 +1,10 @@
+# The ISO build needs the scripts that assemble the boot tree, and nothing
+# else. The repository and the signing key both arrive as named build contexts
+# (ductrepo, ductkey): the repository because it is hundreds of megabytes and
+# changes on every package build, and the key because which one is correct
+# depends on which repository is being installed from.
+*
+!images/iso/
+
+**/.git/
+**/.DS_Store
