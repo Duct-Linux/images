@@ -157,6 +157,27 @@ in a QEMU invocation without firmware. `make iso-run` requires `OVMF=`, and a
 plain `qemu-system-x86_64 -cdrom` shows a blank screen — which is the expected
 result, not a fault.
 
+### The coreutils are uutils, and they do not behave like GNU's
+
+Duct ships `uutils-coreutils`, a Rust reimplementation. It is a drop-in
+replacement for what the commands *do*, and not always for how they behave when
+something goes wrong.
+
+The instance that cost real time: `cp -a` copying a tree over a live root
+filesystem hit `/usr/bin/bash` — the shell running the command — and failed with
+`ETXTBSY`. GNU `cp` reports such an error and carries on with the remaining
+files. uutils' `cp` **stops**. So one busy file silently abandoned everything
+after it, and the build failed several minutes later on a missing program that
+had been copied successfully in every earlier test.
+
+The tell is the error text: `Device or resource busy (os error 16)` is a Rust
+errno, not a GNU one.
+
+Assume this generalises. `mv`, `rm`, `install` and the rest are the same
+implementation, and any reasoning that starts "GNU coreutils would carry on
+here" is unsafe in this tree. Where a command's partial success matters, assert
+the result rather than trusting the exit status.
+
 ### Known absences, so they are not filed as bugs
 
 **There is no `libGL.so`.** Mesa is built `-Dglx=disabled`, so desktop GL is
