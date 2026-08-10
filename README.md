@@ -342,6 +342,81 @@ works out of the box; elsewhere:
 docker run --privileged --rm tonistiigi/binfmt --install all
 ```
 
+## Refreshing duct/builder
+
+`duct/base` and `duct/builder` are not compiled. `Dockerfile.base` builds both —
+they differ only in the `PACKAGES` build argument — and what it does is run
+`tape install` against the *published* repository over HTTPS, verified against
+`duct.key.pub`, into `/rootfs`, then `COPY --from` that into `FROM scratch`. A
+refresh is therefore an assembly and not a rebuild: minutes, and no compiler
+runs. `.github/workflows/assemble.yml` does it for both architectures and a
+final job retags `:latest`.
+
+That matters because CI builds every package *inside* the published image, so
+the image is a second, slower-moving copy of the repository — and it drifts. As
+of this writing the live `ghcr.io/duct-linux/builder:latest` contains:
+
+| checked in the running image | result |
+|---|---|
+| `/usr/bin/pkgconf` | present |
+| `/usr/bin/pkg-config` | **absent**, though published `pkgconf-2.5.1-3` ships it |
+| `/usr/include/openssl` | absent, and `openssl` is in neither package list |
+| `/usr/bin/python3`, `/usr/bin/msgfmt` | present |
+
+The first row is why `pkgs/_scripts/common.sh` carries a `pkg-config` shim: the
+alias exists in the repository and only the image is behind. The shim is
+conditional and disables itself the moment a refreshed image lands, so it costs
+nothing while it waits.
+
+The third row kills a plausible theory before anyone acts on it: refreshing does
+**not** give Python its `ssl` module, because `openssl` is not in either image.
+That gap belongs to dependency seeding and to the version the recipe pins.
+
+### One list, not two
+
+`images/Makefile` and `assemble.yml` both define `BASE_PACKAGES` and the builder
+additions, and they disagree — CI carries `ca-certificates`, `python` and
+`gettext`; the Makefile does not. The running image has `python3` and `msgfmt`,
+which settles which list is real: CI's. So `make builder` locally does not
+reproduce the image CI uses, and because `ISO_BASE_PACKAGES` derives from the
+Makefile's `BUILDER_PACKAGES`, the ISO manifest inherits the stale base too.
+
+Refreshing is the moment to collapse these to a single source rather than to
+sync them. A synced pair drifts again; that is what produced this.
+
+### Order of operations
+
+The risk is not the assembly, it is the retag. Every CI job pulls
+`builder:latest`, so publishing one mid-flight changes the toolchain underneath
+running builds.
+
+1. `workflow_dispatch` with `push: false` — builds and tests both architectures
+   and pushes nothing. The push step and the manifest job are both gated on it,
+   so the dry run already exists and needs no new code.
+2. Wait for other repositories' CI to be idle. Not before.
+3. Collapse the two package lists to one source.
+4. Push, and retag `:latest`.
+5. One full green run against the refreshed image.
+6. *Then* delete the `pkg-config` shim — never in the same change. Deleting it
+   while any job can still pull a cached older image breaks those jobs for no
+   gain.
+
+### If the refresh turns builds red
+
+**Assume it exposed something. Do not assume it broke something.**
+
+A refreshed image is closer to the declared truth than a stale one, so a new
+failure is far more likely to be a pre-existing gap becoming visible than a
+regression introduced by the refresh. Reverting would restore the silence, not
+the correctness.
+
+The precedent is concrete: for a long time no dependencies were seeded into
+builder-image jobs at all, so Python compiled with no OpenSSL headers, silently
+omitted `_ssl` as an "optional module", and **succeeded**. Fixing the seeding
+turned that into a hard compile error. The build did not get worse; the
+reporting got honest, and a package that had already shipped without `ssl` was
+finally visible. Diagnose first, and revert only with a named cause.
+
 ## The honest limitations
 
 - **This is a bootstrap host, not a self-hosted one.** Duct packages built here
