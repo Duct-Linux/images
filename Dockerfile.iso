@@ -125,11 +125,20 @@ RUN set -eux; \
 # adding one needs no change here.
 RUN /iso-tools/post-install.sh /rootfs
 
+# Extra kernel parameters for every live menu entry. Empty by default, and an
+# empty value produces a grub.cfg byte-identical to one built without it.
+#
+# A kernel command line cannot be supplied from outside the ISO: QEMU's -append
+# only applies with -kernel, and an ISO boots through firmware and GRUB, so
+# -append is accepted and silently ignored. Baking it in is the only route.
+ARG CMDLINE_EXTRA=
+
 # The boot tree: initramfs and bootloader, both built by the rootfs's own
 # programs under chroot. See images/iso/make-boot.sh.
 RUN set -eux; \
     install -d /work/isoroot; \
-    /iso-tools/make-boot.sh /rootfs /work/isoroot /iso-tools
+    CMDLINE_EXTRA="${CMDLINE_EXTRA}" \
+        /iso-tools/make-boot.sh /rootfs /work/isoroot /iso-tools
 
 # ---------------------------------------------------------------------------
 # Stage 2 -- pack it.

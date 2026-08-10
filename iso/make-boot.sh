@@ -156,7 +156,49 @@ mods=$(find "$isoroot/boot/grub/$grub_target" -name '*.mod' | wc -l)
 [ "$mods" -gt 0 ] || die "no GRUB modules were copied from $rootfs/usr/lib/grub/$grub_target"
 log "copied $mods GRUB modules"
 
-sed -e "s/@SERIAL@/$serial/g" "$templates/grub.cfg.in" >"$isoroot/boot/grub/grub.cfg"
+# Extra kernel parameters, baked into every live menu entry.
+#
+# This exists because a kernel command line CANNOT be supplied from outside the
+# ISO. QEMU's -append only applies with -kernel, and an ISO boots through
+# firmware and GRUB rather than a kernel QEMU loaded -- so -append is accepted
+# and silently ignored, and the parameter never reaches the kernel. The command
+# line lives here, in the menu entries, and nowhere else.
+#
+# The immediate use is automated testing: an installer test needs to trigger a
+# run without typing on a serial console, and a parameter the boot script acts
+# on is the only way in.
+#
+#   make iso ISO_CMDLINE_EXTRA="duct.install=1"
+#
+# The placeholder in grub.cfg.in is written as " @CMDLINE_EXTRA@" INCLUDING the
+# leading space, and the space is part of what is replaced. An empty value then
+# produces a line byte-identical to one built before this existed, rather than
+# one with a trailing space -- which matters because two builds of the same
+# packages are meant to produce the same ISO, and a stray space would be a
+# difference with no cause anyone could see.
+#
+# & and | and \ are escaped because kernel parameters contain paths --
+# duct.install.disk=/dev/vdb is an ordinary value -- and an unescaped one would
+# either break the substitution or be silently mangled by sed.
+cmdline_extra=${CMDLINE_EXTRA:-}
+if [ -n "$cmdline_extra" ]; then
+	log "extra kernel parameters: $cmdline_extra"
+	esc=$(printf '%s' "$cmdline_extra" | sed -e 's/[&|\\]/\\&/g')
+	cmdline_repl=" $esc"
+else
+	cmdline_repl=
+fi
+
+sed -e "s|@SERIAL@|$serial|g" \
+    -e "s| @CMDLINE_EXTRA@|$cmdline_repl|g" \
+    "$templates/grub.cfg.in" >"$isoroot/boot/grub/grub.cfg"
+
+# The placeholder must be gone whether or not a value was given. A leftover
+# @CMDLINE_EXTRA@ would be passed to the kernel as an unrecognised parameter,
+# which the kernel tolerates silently -- so this would not fail, it would just
+# quietly not work.
+! grep -q '@CMDLINE_EXTRA@' "$isoroot/boot/grub/grub.cfg" ||
+	die "the CMDLINE_EXTRA placeholder survived substitution"
 chmod 0644 "$isoroot/boot/grub/grub.cfg"
 
 # The marker early-grub.cfg searches for, and the only thing that distinguishes

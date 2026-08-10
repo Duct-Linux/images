@@ -170,6 +170,16 @@ ISO_VOLID    ?= DUCT_LIVE
 # zstd, not xz: a live root filesystem is decompressed continuously for as long
 # as the system runs, and zstd reads about three times faster for 8% more size.
 ISO_COMP     ?= zstd
+
+# Extra kernel parameters baked into every live menu entry. Empty by default,
+# and empty produces a byte-identical ISO to one built without it.
+#
+# A kernel command line cannot be injected from outside the ISO -- QEMU's
+# -append only applies with -kernel, and an ISO boots through firmware and GRUB,
+# so -append is silently ignored. This is the only way in.
+#
+#   make iso ISO_CMDLINE_EXTRA="duct.install=1"
+ISO_CMDLINE_EXTRA ?=
 ISO_REPO_URL ?= /repo
 ISO_OUT      ?= $(CURDIR)/out
 
@@ -218,6 +228,7 @@ iso: have-repo | out
 		--build-arg REPO_URL=$(ISO_REPO_URL) \
 		--build-arg VOLID=$(ISO_VOLID) \
 		--build-arg COMPRESSION=$(ISO_COMP) \
+		--build-arg CMDLINE_EXTRA="$(ISO_CMDLINE_EXTRA)" \
 		--build-arg PACKAGES="$(ISO_PACKAGES)" \
 		--output type=local,dest=$(ISO_OUT) \
 		$(CONTEXT)
