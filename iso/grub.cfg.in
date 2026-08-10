@@ -31,7 +31,7 @@ menuentry 'Duct Linux (live)' {
 	#
 	# In this order a machine with a serial port puts the shell there, and one
 	# without falls back to tty0 and the screen.
-	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200 @CMDLINE_EXTRA@
 	initrd /boot/initramfs.img
 }
 
@@ -39,14 +39,14 @@ menuentry 'Duct Linux (live, verbose boot)' {
 	# ignore_loglevel puts every kernel message on the console, and
 	# duct.live.debug turns on `set -x` in the initramfs. This is the entry to
 	# choose when the first one reaches the initramfs shell.
-	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200 ignore_loglevel duct.live.debug
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=tty0 console=@SERIAL@,115200 ignore_loglevel duct.live.debug @CMDLINE_EXTRA@
 	initrd /boot/initramfs.img
 }
 
 menuentry 'Duct Linux (live, serial console only)' {
 	# For a machine being driven entirely over a serial line: tty0 is left out
 	# so /dev/console cannot land on a display nobody is looking at.
-	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200
+	linux /boot/vmlinuz duct.live.label=DUCT_LIVE console=@SERIAL@,115200 @CMDLINE_EXTRA@
 	initrd /boot/initramfs.img
 }
 
