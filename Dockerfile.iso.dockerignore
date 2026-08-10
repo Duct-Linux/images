@@ -3,8 +3,13 @@
 # (ductrepo, ductkey): the repository because it is hundreds of megabytes and
 # changes on every package build, and the key because which one is correct
 # depends on which repository is being installed from.
+#
+# Deny-everything allowlist: a new COPY in the Dockerfile needs a line here or
+# it fails with "file not found in build context", which reads as a missing
+# file rather than an excluded one.
 *
 !images/iso/
+!images/scripts/seed-etc.sh
 
 **/.git/
 **/.DS_Store

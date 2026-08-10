@@ -107,6 +107,11 @@ RUN --mount=type=bind,from=ductrepo,target=/repo \
 # those can.
 COPY images/iso/ /iso-tools/
 
+# Shared with Dockerfile.base rather than living under images/iso/, because what
+# it does is a property of duct-filesystem and so of every image. post-install.sh
+# invokes it from its own directory, so it has to land beside it.
+COPY images/scripts/seed-etc.sh /iso-tools/seed-etc.sh
+
 RUN set -eux; \
     chmod +x /iso-tools/*.sh; \
     install -d /rootfs/etc/tape/repos /rootfs/etc/tape/keys /rootfs/var/cache/tape/repos; \

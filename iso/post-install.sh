@@ -41,6 +41,19 @@ run_in() {
 }
 
 # ---------------------------------------------------------------------------
+# The mutable /etc files
+# ---------------------------------------------------------------------------
+
+# Before everything, including ldconfig: the steps below run programs inside the
+# rootfs, and a program that resolves a user needs /etc/passwd to already exist.
+#
+# Delegated rather than reimplemented. The same script runs in Dockerfile.base,
+# because the reason those files are templates is a property of duct-filesystem
+# and therefore of every image -- not of the ISO, which is merely where the
+# consequence was first noticed.
+"$(dirname "$0")/seed-etc.sh" "$rootfs"
+
+# ---------------------------------------------------------------------------
 # The linker cache
 # ---------------------------------------------------------------------------
 
