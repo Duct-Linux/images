@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.7
+#
+# A bootable disk image, for testing that an installed Duct system needs no
+# initramfs.
+#
+# This is a TEST ARTEFACT and not an installer. It produces the smallest disk
+# that can answer one question -- does firmware -> GRUB -> kernel -> ext4 root
+# work with root=PARTUUID= and nothing in between -- and it deliberately stops
+# there. What runs as PID 1 on a real installed system is a separate decision
+# and is not pre-empted here: the init on this image prints a marker and powers
+# off.
+#
+# It reuses the ISO's assemble stage rather than assembling its own rootfs, so
+# the kernel and the GRUB it links are the same artefacts the live ISO ships.
+# Testing a different build of them would answer a different question.
+#
+#   docker buildx build -f images/Dockerfile.iso --target assemble \
+#     --load -t duct/iso-rootfs:latest .
+#   docker buildx build -f images/Dockerfile.disk \
+#     --build-arg ROOTFS=duct/iso-rootfs:latest \
+#     --output type=local,dest=out/disk .
+
+ARG ROOTFS=duct/iso-rootfs:latest
+ARG DEBIAN_DIGEST=sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+
+# ---------------------------------------------------------------------------
+# Stage 1 -- the boot tree, built by Duct's own grub-mkimage under chroot.
+# ---------------------------------------------------------------------------
+FROM ${ROOTFS} AS bootfs
+
+# Fixed rather than generated, so the image is reproducible and so the EFI
+# binary -- which has the PARTUUID compiled into its embedded config -- can be
+# linked before the partition table that will carry that GUID exists.
+ARG ROOT_PARTUUID=44444444-4444-4444-8444-444444444444
+
+COPY images/iso/make-disk-boot.sh /iso-tools/make-disk-boot.sh
+
+RUN set -eux; \
+    chmod +x /iso-tools/make-disk-boot.sh; \
+    /iso-tools/make-disk-boot.sh /rootfs /work/disktree "${ROOT_PARTUUID}"
+
+# ---------------------------------------------------------------------------
+# Stage 2 -- author the disk. Debian, for the same reason the ISO stage is
+# Debian: mkfs.ext4, mkfs.vfat, mtools and sfdisk are not Duct packages, and
+# packaging four host-side authoring tools to build a test image would be the
+# wrong trade.
+#
+# Not snapshot-pinned, unlike the ISO. This image is never shipped and never
+# compared byte-for-byte against another build; the artefact whose
+# reproducibility matters is the ISO, and that stage keeps its pinning.
+# ---------------------------------------------------------------------------
+FROM debian@${DEBIAN_DIGEST} AS author
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -eux; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends \
+        e2fsprogs dosfstools mtools fdisk coreutils; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=bootfs /work/disktree /work/disktree
+COPY images/iso/build-disk.sh /iso-tools/build-disk.sh
+
+RUN set -eux; \
+    chmod +x /iso-tools/build-disk.sh; \
+    mkdir -p /out; \
+    /iso-tools/build-disk.sh /work/disktree /work/disktree/boot.env \
+        /out/duct-disk-test.img
+
+# ---------------------------------------------------------------------------
+FROM scratch
+COPY --from=author /out/duct-disk-test.img /

@@ -271,6 +271,61 @@ iso-boot-test:
 	test -f "$$iso" || { echo "no $$iso -- run: make iso"; exit 1; }; \
 	$(CURDIR)/iso/boot-test.sh "$$iso" $(ISO_ARCH)
 
+# ---------------------------------------------------------------------------
+# The installed-system boot path
+# ---------------------------------------------------------------------------
+
+# An installed Duct system is meant to boot with NO initramfs: the kernel has
+# ext4, the block drivers and the EFI partition parser built in, so it can
+# resolve root=PARTUUID= and mount its root unaided. Nothing on the live path
+# tests that, because the live path is precisely what an installed system does
+# differently -- label search, squashfs, overlay, switch_root.
+#
+# So this builds the smallest disk that can answer the question and boots it.
+# It reuses the ISO's assemble stage, so the kernel and the GRUB binary under
+# test are the same artefacts the ISO ships rather than a second build of them.
+#
+#   make disk && make disk-boot-test
+DISK_OUT      ?= $(ISO_OUT)
+DISK_FILE     ?= duct-disk-test-$(ISO_ARCH).img
+DISK_ROOTFS   ?= duct/iso-rootfs:latest
+
+# Fixed, because the EFI binary has it compiled into its embedded grub.cfg and
+# is therefore linked before the partition table exists.
+ROOT_PARTUUID ?= 44444444-4444-4444-8444-444444444444
+
+disk-rootfs: have-repo
+	docker buildx build -f $(CURDIR)/Dockerfile.iso --target assemble --load \
+		--build-context ductrepo=$(LOCAL_REPO) \
+		--build-context ductkey=$(ISO_KEY_DIR) \
+		--build-arg BOOTSTRAP=$(NAME):latest \
+		--build-arg REPO_URL=$(ISO_REPO_URL) \
+		--build-arg PACKAGES="$(ISO_PACKAGES)" \
+		-t $(DISK_ROOTFS) $(CONTEXT)
+
+disk: disk-rootfs | out
+	docker buildx build -f $(CURDIR)/Dockerfile.disk \
+		--build-arg ROOTFS=$(DISK_ROOTFS) \
+		--build-arg DEBIAN_DIGEST=$(DEBIAN_DIGEST) \
+		--build-arg ROOT_PARTUUID=$(ROOT_PARTUUID) \
+		--output type=local,dest=$(DISK_OUT) \
+		$(CONTEXT)
+	@mv $(DISK_OUT)/duct-disk-test.img $(DISK_OUT)/$(DISK_FILE)
+	@echo "==> wrote out/$(DISK_FILE)"
+
+# The same QEMU harness the ISO uses -- it takes any raw image and a marker,
+# and a disk is as much a block device to it as a disc was.
+#
+# The marker is printed by the test init AFTER it has mounted /proc and read
+# the command line, so it cannot be reached by a kernel that got to init
+# without a working root filesystem.
+disk-boot-test:
+	@set -eu; \
+	img=$(DISK_OUT)/$(DISK_FILE); \
+	test -f "$$img" || { echo "no $$img -- run: make disk"; exit 1; }; \
+	BOOT_MARKER="duct-disk-test: DISK BOOT OK" \
+		$(CURDIR)/iso/boot-test.sh "$$img" $(ISO_ARCH)
+
 # Boot it interactively, with qemu on the host. Needs an EDK2 firmware image:
 # an EFI-only ISO has nothing for a BIOS to run, so `qemu-system-x86_64`
 # without -bios OVMF shows a blank screen and that is the expected behaviour,
