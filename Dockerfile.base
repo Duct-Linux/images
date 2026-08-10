@@ -81,6 +81,23 @@ RUN set -eux; \
     kill "$daemon_pid"; wait "$daemon_pid" 2>/dev/null || true; \
     exit $status
 
+# The first copy of /etc/passwd, /etc/group and /etc/hosts, which duct-filesystem
+# ships as templates rather than as real files -- they are rewritten on a running
+# system, and a package that owns them silently reverts those rewrites on its
+# next upgrade.
+#
+# This runs BEFORE anything below that reads them. chroot'ing to run the target's
+# own ldconfig resolves a user, and a passwd file that appears afterwards is a
+# passwd file that was not there when it was needed.
+#
+# It is the same script the ISO build runs, and it is here rather than only there
+# because the cause lives in duct-filesystem, which is in every image -- not on
+# the ISO, where the symptom happened to be noticed.
+COPY images/scripts/seed-etc.sh /usr/local/bin/seed-etc.sh
+RUN set -eux; \
+    chmod +x /usr/local/bin/seed-etc.sh; \
+    /usr/local/bin/seed-etc.sh /rootfs
+
 # Everything tape needs at runtime that sysroot does not cover: its config
 # directory and cache both resolve from absolute paths that know nothing about
 # the sysroot. The repo definition and public key are installed into the image

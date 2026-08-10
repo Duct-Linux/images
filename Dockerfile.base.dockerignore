@@ -1,4 +1,9 @@
-# Assembling an image needs the trust anchor and nothing else: every package
-# comes off the repository server over HTTPS.
+# Assembling an image needs the trust anchor and the /etc seeding step: every
+# package comes off the repository server over HTTPS.
+#
+# This file is a deny-everything allowlist, so a new COPY in the Dockerfile
+# needs a line here or it fails with "file not found in build context" -- which
+# reads as a missing file rather than an excluded one.
 *
 !packages/server/duct.key.pub
+!images/scripts/seed-etc.sh
