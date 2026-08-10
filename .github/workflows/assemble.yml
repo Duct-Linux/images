@@ -34,20 +34,11 @@ env:
   REGISTRY: ghcr.io/duct-linux
   REPO_URL: https://repo.duct.dss-net.de
 
-  # What each image is. tape resolves dependencies itself, so these could be
-  # shorter -- listing them makes the contents a reviewable decision rather than
-  # a consequence of whatever some recipe happens to depend on.
-  # ca-certificates is not optional here despite nothing linking against it:
-  # without a trust store tape cannot complete a TLS handshake, so an image
-  # missing it can never install or update anything from the repository it was
-  # built from. It has to arrive in the image because it cannot be fetched by a
-  # client that does not already have it.
-  BASE_PACKAGES: >-
-    duct-filesystem ca-certificates linux-headers glibc zlib gmp mpfr mpc
-    binutils gcc ncurses bash uutils-coreutils tape
-  BUILDER_EXTRA: >-
-    m4 bison flex make gawk sed grep findutils diffutils
-    tar gzip xz bzip2 patch file pkgconf perl texinfo python gettext
+  # The package sets are NOT here. They live in images/Makefile and are read
+  # from it below, because a copy in this file is a second source of truth --
+  # and the two had already drifted by three packages (ca-certificates, python,
+  # gettext) before anyone noticed, with the Makefile silently building a
+  # different image than CI did.
 
 jobs:
   assemble:
@@ -98,6 +89,29 @@ jobs:
           curl -fsS -o /dev/null "$REPO_URL/repo.db.sig"
           echo "repository is serving an index and a signature"
 
+      # One list and one reader. The Makefile defines the image sets as the union
+      # of a runtime list and a build-only list, so a package cannot be added
+      # without being classified, and this workflow holds no copy to drift.
+      - name: Read the package sets from the Makefile
+        if: steps.have.outputs.yes == 'true'
+        run: |
+          set -euo pipefail
+          base=$(make -s -C images print-BASE_PACKAGES)
+          builder=$(make -s -C images print-BUILDER_PACKAGES)
+
+          # An empty set is the dangerous failure, not a loud one: PACKAGES=""
+          # would assemble an image containing nothing and the build would
+          # SUCCEED. A missing target or a renamed variable both land here.
+          for name in base builder; do
+            eval "v=\$$name"
+            [ -n "$v" ] || { echo "::error::$name package set came back empty; is the print- target still there?"; exit 1; }
+          done
+
+          echo "BASE_PACKAGES=$base"       >>"$GITHUB_ENV"
+          echo "BUILDER_PACKAGES=$builder" >>"$GITHUB_ENV"
+          echo "base    ($(echo $base    | wc -w)): $base"
+          echo "builder ($(echo $builder | wc -w)): $builder"
+
       - name: Assemble
         if: steps.have.outputs.yes == 'true'
         run: |
@@ -111,7 +125,7 @@ jobs:
           docker build -f images/Dockerfile.base \
             --build-arg BOOTSTRAP="$REGISTRY/bootstrap:${{ matrix.arch }}" \
             --build-arg REPO_URL="$REPO_URL" \
-            --build-arg PACKAGES="$BASE_PACKAGES $BUILDER_EXTRA" \
+            --build-arg PACKAGES="$BUILDER_PACKAGES" \
             --build-arg IMAGE_TITLE="Duct builder" \
             --build-arg IMAGE_DESCRIPTION="Duct system with a full build toolchain" \
             -t "$REGISTRY/builder:${{ matrix.arch }}" .
