@@ -31,8 +31,20 @@ log() { echo "make-boot: $*"; }
 # symlink to it. The release is read back from the real name rather than from
 # `uname -r`, which would report the *build host's* kernel -- a Docker daemon's
 # kernel, on a machine that may not even be running Linux.
-kernel=$(ls "$rootfs"/boot/vmlinuz-* 2>/dev/null | head -1) || true
-[ -n "${kernel:-}" ] || die "no /boot/vmlinuz-* in the rootfs; is the linux package in the manifest?"
+# Count first, assert the count, THEN take the value.
+#
+# This was `ls ... | head -1` with an is-it-empty check, which has two faults.
+# It SILENTLY PICKS ONE of several kernels -- and the comment above says there
+# is exactly one, so the code was checking something weaker than the invariant
+# it was written against. And the 2>/dev/null discarded the reason: a
+# permission error or a broken mount produced the message below, which names
+# the manifest confidently and sends the reader to a file that is fine.
+if ! kernel_list=$(find "$rootfs/boot" -maxdepth 1 -name 'vmlinuz-*' -type f 2>&1); then
+	die "cannot list $rootfs/boot: $kernel_list"
+fi
+kernel_n=$(printf '%s' "$kernel_list" | grep -c . || true)
+[ "$kernel_n" -eq 1 ] || die "expected exactly one /boot/vmlinuz-* in the rootfs, found $kernel_n${kernel_list:+ -- $kernel_list}; is the linux package in the manifest?"
+kernel=$kernel_list
 release=${kernel##*/vmlinuz-}
 log "kernel $release"
 
@@ -42,8 +54,15 @@ log "kernel $release"
 # GRUB names its own target and there is exactly one, because the package is
 # built --with-platform=efi. Reading it back beats hardcoding a table: if the
 # grub package is ever built for another architecture, this keeps working.
-grub_target=$(ls "$rootfs/usr/lib/grub" 2>/dev/null | head -1) || true
-[ -n "${grub_target:-}" ] || die "no GRUB platform directory in $rootfs/usr/lib/grub"
+# Exactly one, as the comment above states. Taking head -1 of several would
+# link the EFI binary for the WRONG ARCHITECTURE and produce an ISO that
+# builds, passes iso-test, and does not boot.
+if ! grub_dirs=$(find "$rootfs/usr/lib/grub" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>&1); then
+	die "cannot list $rootfs/usr/lib/grub: $grub_dirs"
+fi
+grub_n=$(printf '%s' "$grub_dirs" | grep -c . || true)
+[ "$grub_n" -eq 1 ] || die "expected exactly one GRUB platform directory, found $grub_n${grub_dirs:+ -- $grub_dirs}"
+grub_target=$grub_dirs
 log "GRUB platform $grub_target"
 
 # The name firmware looks for on the removable-media path. This is fixed by the
@@ -152,8 +171,24 @@ cp "$rootfs/usr/lib/grub/$grub_target"/*.lst "$isoroot/boot/grub/$grub_target/" 
 #
 # The count is the assertion. GRUB ships over two hundred modules; zero means
 # the copy did not happen, whatever the reason.
+# A PLAUSIBLE COUNT, not "at least one".
+#
+# The comment above already knew the right number -- "GRUB ships over two
+# hundred modules" -- while the check accepted ONE. A copy that moved a single
+# module out of two hundred strands someone at a GRUB prompt exactly as an
+# empty directory does, and `-gt 0` calls it a success. "At least one" is a
+# positive control wearing an assertion's clothes: it proves the copy HAPPENED,
+# not that it COMPLETED.
+#
+# The real number is 220, measured from three separate ISO builds of this
+# tree ("copied 220 GRUB modules"), so the comment's "over two hundred" is
+# accurate rather than remembered.
+#
+# The floor is 100 rather than 220 because it guards against a PARTIAL COPY
+# and is not a specification of GRUB's module set -- a future GRUB shipping
+# somewhat fewer should not fail an ISO that boots.
 mods=$(find "$isoroot/boot/grub/$grub_target" -name '*.mod' | wc -l)
-[ "$mods" -gt 0 ] || die "no GRUB modules were copied from $rootfs/usr/lib/grub/$grub_target"
+[ "$mods" -ge 100 ] || die "only $mods GRUB modules were copied from $rootfs/usr/lib/grub/$grub_target; GRUB ships over two hundred, so this copy did not complete"
 log "copied $mods GRUB modules"
 
 # Extra kernel parameters, baked into every live menu entry.

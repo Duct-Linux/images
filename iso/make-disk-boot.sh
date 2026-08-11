@@ -30,12 +30,31 @@ partuuid=${3:?usage: make-disk-boot.sh <rootfs> <outdir> <root-partuuid>}
 die() { echo "make-disk-boot: $*" >&2; exit 1; }
 log() { echo "make-disk-boot: $*"; }
 
-kernel=$(ls "$rootfs"/boot/vmlinuz-* 2>/dev/null | head -1) || true
-[ -n "${kernel:-}" ] || die "no /boot/vmlinuz-* in the rootfs"
+# Count first, assert the count, THEN take the value.
+#
+# This was `ls ... | head -1` with an is-it-empty check, which has two faults.
+# It SILENTLY PICKS ONE of several kernels -- and the comment above says there
+# is exactly one, so the code was checking something weaker than the invariant
+# it was written against. And the 2>/dev/null discarded the reason: a
+# permission error or a broken mount produced the message below, which names
+# the manifest confidently and sends the reader to a file that is fine.
+if ! kernel_list=$(find "$rootfs/boot" -maxdepth 1 -name 'vmlinuz-*' -type f 2>&1); then
+	die "cannot list $rootfs/boot: $kernel_list"
+fi
+kernel_n=$(printf '%s' "$kernel_list" | grep -c . || true)
+[ "$kernel_n" -eq 1 ] || die "expected exactly one /boot/vmlinuz-* in the rootfs, found $kernel_n${kernel_list:+ -- $kernel_list}"
+kernel=$kernel_list
 release=${kernel##*/vmlinuz-}
 
-grub_target=$(ls "$rootfs/usr/lib/grub" 2>/dev/null | head -1) || true
-[ -n "${grub_target:-}" ] || die "no GRUB platform directory"
+# Exactly one, as the comment above states. Taking head -1 of several would
+# link the EFI binary for the WRONG ARCHITECTURE and produce an ISO that
+# builds, passes iso-test, and does not boot.
+if ! grub_dirs=$(find "$rootfs/usr/lib/grub" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>&1); then
+	die "cannot list $rootfs/usr/lib/grub: $grub_dirs"
+fi
+grub_n=$(printf '%s' "$grub_dirs" | grep -c . || true)
+[ "$grub_n" -eq 1 ] || die "expected exactly one GRUB platform directory, found $grub_n${grub_dirs:+ -- $grub_dirs}"
+grub_target=$grub_dirs
 
 case "$grub_target" in
 	arm64-efi)   efi_name=BOOTAA64.EFI;    serial=ttyAMA0 ;;
