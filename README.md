@@ -23,8 +23,61 @@ duct-live.iso    The same package set plus a kernel and a bootloader, as a
                  bootable UEFI ISO.  make iso && make iso-test
 ```
 
-`duct/rust` (`make rust`) exists only to build uutils-coreutils, the one package
-written in a language Duct does not package.
+`duct/rust` (`make rust`) builds the packages written in a language Duct does not
+package -- uutils-coreutils, and `rust` itself, which bootstraps from it.
+
+### Building `duct/rust`
+
+`.github/workflows/rust.yml` builds and publishes it for both architectures, on
+native runners. It triggers on a change to `Dockerfile.rust` and on
+`workflow_dispatch`, fetches the pinned rustc tarball itself and checks it
+against the sha256 in `Dockerfile.rust` before building.
+
+It reads that pin rather than repeating it. A version and a hash written in two
+files are a version and a hash that will eventually disagree, and the resulting
+error names a checksum mismatch rather than the stale duplicate that caused it.
+
+**Both architectures or neither.** Each architecture pushes only a run-scoped
+`rust:ci-<arch>-<run_id>` tag; a `promote` job that runs only when *every* matrix
+leg succeeded moves both to `rust:<arch>` and assembles `rust:latest`. This
+matters because of how the consumer behaves: `build.yml` in the packages repo
+probes `ghcr.io/duct-linux/rust:<arch>` and schedules the package for whichever
+architectures resolve. A tag that exists but is a rebuild behind is therefore
+worse than a missing one -- the probe passes, the job runs, and it fails on a
+tool the image does not have yet. Publishing one architecture at a time would
+manufacture exactly that state.
+
+For the same reason this workflow **fails** on a missing base image where
+`assemble.yml` and `bootstrap.yml` skip with a notice. Skipping is right for
+them: an architecture that has never been bootstrapped has nothing to assemble.
+Here it would half-publish.
+
+The local path is unchanged: `make rust` still builds from
+`$(RUST_SOURCES)` (`~/.cache/duct/rust`), which is what a from-scratch local
+build uses and what CI is not a substitute for.
+
+### What this image deliberately does not carry
+
+The C libraries a Rust package links against, and the Rust *build tools* a
+package needs.
+
+Both build paths install every previously-built Duct package into the container
+before `tape-builder` runs -- `BUILD_IN_CONTAINER` in `packages/Makefile`
+locally, the `/deps` copy in `build-level.yml` in CI. Neither is conditional on
+which image the job uses: in CI every seeding step is gated only on the build
+cache, and the copy itself is gated on being root and on `/deps` having content.
+`duct/rust` runs as root, so it is seeded like any other image.
+
+Duct has no `-dev` split, so headers and `.pc` files arrive with the package.
+That covers the C libraries. It also covers build tools written in Rust: one
+built as a package here and published is seeded into whatever job needs it, and
+`find_program` resolves it at configure time. `meson` itself arrives this way.
+
+So a Rust package with C dependencies needs nothing from this image but the
+toolchain. Adding a GTK stack, or a cargo subcommand, would be a second copy of
+something the seed already provides -- and if it landed in `/usr/local/bin` it
+would *shadow* the seeded package, since that directory precedes `/usr/bin` on
+this image's `PATH`. Two versions, the wrong one winning, and nothing saying so.
 
 ## Two halves, very different costs
 
@@ -44,6 +97,10 @@ public key and checks the same digests a user's machine would, so a broken
 publish fails in CI rather than on someone's first `tape install`. The resulting
 images carry the repo definition and the key, so they can update themselves from
 the repository they came from.
+
+**Rust** (`.github/workflows/rust.yml`) builds `duct/rust`, sitting between the
+two on cost: it compiles, but only a toolchain's worth rather than a system's.
+It runs on a `Dockerfile.rust` change and on demand, not on every push.
 
 This repo expects `tape`, `packages` and `images` checked out as siblings: the
 Docker build context is their common parent, because the bootstrap image
