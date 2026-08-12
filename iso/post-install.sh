@@ -5,10 +5,16 @@
 #   post-install.sh <rootfs>
 #
 # This exists because tape has no install hooks. A package can put files in
-# place and nothing else: it cannot run ldconfig, it cannot regenerate a cache
-# keyed on what else is installed, and it cannot set a setuid bit -- tape's
-# archiver does not carry setuid, setgid or sticky bits at all. Any of those
-# has to be done once, here, by whoever assembles the image.
+# place and nothing else: it cannot run ldconfig and it cannot regenerate a
+# cache keyed on what else is installed. Any of those has to be done once,
+# here, by whoever assembles the image.
+#
+# It also, today, has to set the setuid and sticky bits -- see the long note
+# below. That is a defect being fixed in tape, not a property of packaging:
+# tape's archiver carries all three correctly, and the PUBLISH step throws them
+# away. The previous wording here ("tape's archiver does not carry setuid,
+# setgid or sticky bits at all") reached the right conclusion about the shipped
+# payload by blaming the wrong component, which is why nobody went looking.
 #
 # Every step is guarded on the program existing. Today's ISO manifest has a
 # compiler and a shell and none of the desktop libraries, so most of this is a
@@ -65,19 +71,39 @@ run_in() {
 run_in /usr/sbin/ldconfig
 
 # ---------------------------------------------------------------------------
-# Belt and braces on the mode bits
+# The mode bits. THESE LINES ARE LOAD-BEARING -- they are not belt and braces.
 #
-# These were written when packages/README.md said tape could not represent
-# setuid, setgid or sticky bits at all. That turned out to be wrong, and it was
-# worth measuring rather than believing: install.go sets PreserveSetuid on
-# extraction and sanitizeMode() in tarUtils honours setuid, setgid and sticky
-# when it is set, so `tape install` carries all three end to end.
+# They used to say they were. The previous comment reported, correctly, that
+# `tape install` carries setuid, setgid and sticky end to end: install.go sets
+# PreserveSetuid on extraction and sanitizeMode() honours all three. It then
+# concluded that everything below is a no-op on a correct extraction. That
+# conclusion was wrong, and the reason is one step further out than anyone
+# looked: a MEASURED CAPABILITY OF THE TRANSPORT WAS READ AS A PROPERTY OF THE
+# PAYLOAD. tape install faithfully carries a bit the package does not have.
 #
-# Kept anyway, and deliberately. Every line below is idempotent and guarded on
-# the path existing, so on a correct extraction they are no-ops that cost
-# microseconds -- and if tape's extraction path ever changes, the failure they
-# prevent is a world-writable /tmp with no sticky bit and a passwd that cannot
-# change a password. That is a poor thing to find out from a user.
+# Measured 2026-08-12 against the published index, not against a recipe: all
+# 622 live payloads on both architectures were downloaded and listed -- 251,608
+# entries, ZERO carrying a setuid, setgid or sticky bit, and zero owned by
+# anything but root. Not one package has ever shipped one.
+#
+# The cause is in tape and not here: `tape-repo add-to-repo` extracts each
+# incoming package with PreserveSetuid: false and re-tars the extraction into
+# the file the repository serves (repo/utils/pkgOpen.go, repo/utils/pkgCopy.go).
+# The builder is innocent -- duct-filesystem built end to end in both builder
+# images produces 1777 on /tmp, and the published payload of the same
+# subversion differs from it in exactly those two directories and nothing else.
+# That is being fixed in tape separately.
+#
+# So until a FIXED tape has republished those packages, every line below is the
+# only reason a Duct system has a sticky /tmp or a passwd a user can run. They
+# stay after that too, as the guard they were always described as -- but nobody
+# reading this should believe they are currently costing microseconds and doing
+# nothing.
+#
+# Because these are the real thing rather than a backstop, the list has to be
+# COMPLETE. It was eleven entries short when this was written, which is the
+# predictable failure of a hand-maintained list nobody thought was carrying
+# weight: it had drifted behind the package set with nothing to notice.
 # ---------------------------------------------------------------------------
 
 # if/then rather than `[ -d ] && chmod`: the AND-list is the last command in
@@ -95,18 +121,46 @@ done
 # these belong to packages that may or may not be in the manifest.
 #
 # Nothing is added here lightly: a setuid root binary is a promise that its
-# argument handling is correct. The list is short and every entry is a program
-# whose whole purpose requires the bit.
+# argument handling is correct. Every entry below is a program whose whole
+# purpose requires the bit, and each was checked against the PUBLISHED payload
+# of its package rather than against the recipe that was supposed to set it.
+#
+# EVERY MODE IS root:root, AND THE GROUP IS NOT AVAILABLE TO US. Two
+# independent mechanisms take it away, so this is not a preference:
+#   - tape's archiver zeroes header.Uid/Gid on purpose, so no package can ship
+#     an owner other than root (measured: 0 of 251,608 published entries has a
+#     non-zero owner);
+#   - build-iso.sh packs with `mksquashfs -all-root`, which forces every file
+#     in the image to root:root. The setuid BIT survives that, the GROUP does
+#     not.
+# So upstream arrangements that restrict a helper by group -- dbus ships its
+# launch helper 4750 root:messagebus -- cannot work on a Duct system: the file
+# arrives 4750 root:root and the daemon, running as messagebus, cannot execute
+# its own helper. The restriction has to come from the mode. Do not "correct"
+# any 4755 below to an upstream 4750.
 #
 # util-linux's mount and umount are *not* here on purpose. The recipe builds
 # them with --disable-makeinstall-setuid, so on a Duct system only root mounts
-# things -- an intended restriction rather than an omission to repair.
+# things -- an intended restriction rather than an omission to repair. Same for
+# bubblewrap's bwrap, which is deliberately unprivileged and uses user
+# namespaces instead.
 setuid_table="
 4755 /usr/bin/passwd
 4755 /usr/bin/chage
 4755 /usr/bin/newgrp
 4755 /usr/bin/gpasswd
 4755 /usr/bin/su
+4755 /usr/bin/expiry
+4755 /usr/bin/chfn
+4755 /usr/bin/chsh
+4755 /usr/bin/newuidmap
+4755 /usr/bin/newgidmap
+4755 /usr/sbin/unix_chkpwd
+4755 /usr/sbin/pam_timestamp_check
+4755 /usr/bin/pkexec
+4755 /usr/lib/polkit-1/polkit-agent-helper-1
+4755 /usr/bin/fusermount3
+4755 /usr/libexec/dbus-daemon-launch-helper
 "
 echo "$setuid_table" | while read -r mode path; do
 	[ -n "$mode" ] || continue
