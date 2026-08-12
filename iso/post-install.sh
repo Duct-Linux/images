@@ -91,8 +91,9 @@ for d in tmp var/tmp; do
 	fi
 done
 
-# Each entry is "<mode> <path>"; a path that is not there is skipped, because
-# these belong to packages that may or may not be in the manifest.
+# Each entry is "<mode> <owner:group> <path>"; a path that is not there is
+# skipped, because these belong to packages that may or may not be in the
+# manifest.
 #
 # Nothing is added here lightly: a setuid root binary is a promise that its
 # argument handling is correct. The list is short and every entry is a program
@@ -101,19 +102,108 @@ done
 # util-linux's mount and umount are *not* here on purpose. The recipe builds
 # them with --disable-makeinstall-setuid, so on a Duct system only root mounts
 # things -- an intended restriction rather than an omission to repair.
+#
+# THE COMMENT ABOVE THIS TABLE USED TO SAY IT WAS BELT AND BRACES. IT IS NOT.
+# It was written after measuring that `tape install` CAN carry setuid, which is
+# true and turned out to be the wrong question: the bit has to be ON THE
+# PACKAGED FILE for tape to carry it, and for at least two programs it is not,
+# because their build systems set it with an install(1) that could not chown as
+# a non-root builder. Measured in the PUBLISHED payloads, not inferred:
+# dbus-daemon-launch-helper ships 0755, unix_chkpwd ships 0755.
+#
+# dbus-daemon-launch-helper is the one that matters, and it is not a small
+# thing. D-Bus system activation of any service whose .service file names a
+# User= runs through that helper, and the helper refuses to work without the
+# bit -- "The permission of the setuid helper is not correct". EVERY system
+# service in this tree declares User=: elogind, polkit, accountsservice,
+# upower, colord, NetworkManager, ModemManager, geoclue and wpa_supplicant,
+# ten of ten. So D-BUS SYSTEM ACTIVATION HAS NEVER WORKED HERE, and every
+# recorded conclusion of the form "X is D-Bus activated, so nothing needs to
+# start it" describes a mechanism that could not fire.
+#
+# Found by gdm, which is the first thing to depend on it and say so:
+#
+#   gdm: Failed to contact accountsservice: Error calling StartServiceByName
+#        for org.freedesktop.Accounts: The permission of the setuid helper is
+#        not correct
+#
+# and then exit 1, silently, because gdm logs only through syslog and nothing
+# on the medium reads /dev/log.
+#
+# 4755 root:root FOR THE HELPER, AND NOT UPSTREAM'S 4750 root:messagebus --
+# BECAUSE THE OWNER COLUMN OF THIS TABLE IS A LIE ON A LIVE MEDIUM.
+#
+# build-iso.sh packs the rootfs with `mksquashfs -all-root`, which forces every
+# file in the image to root:root. That is a deliberate choice with a good
+# reason (the rootfs is assembled by a build that may not run as uid 0), and it
+# means A GROUP-RESTRICTED MODE CANNOT SURVIVE THE ISO. 4750 root:messagebus
+# arrives on the medium as 4750 root:ROOT, which gives execute to nobody but
+# root -- and dbus-daemon runs as messagebus, so it cannot exec its own helper:
+#
+#   Failed to execute program org.freedesktop.Accounts: Permission denied
+#
+# Measured both ways. As uid/gid 18 the 4750 helper runs fine in a container
+# built from the same rootfs (rc=0, elogind actually starts) and fails EACCES
+# on the booted medium, with nosuid refuted by /proc/mounts -- overlay and
+# squashfs are both plain rw/ro,relatime. The difference is -all-root and
+# nothing else.
+#
+# So the setuid bit survives the ISO and the GROUP does not. Any entry here
+# whose correctness depends on a non-root group is silently wrong on the
+# medium, and reads as correct in the rootfs right up until something tries to
+# use it. Keep every group in this table root, and get the restriction from
+# the mode instead.
 setuid_table="
-4755 /usr/bin/passwd
-4755 /usr/bin/chage
-4755 /usr/bin/newgrp
-4755 /usr/bin/gpasswd
-4755 /usr/bin/su
+4755 root:root /usr/bin/passwd
+4755 root:root /usr/bin/chage
+4755 root:root /usr/bin/newgrp
+4755 root:root /usr/bin/gpasswd
+4755 root:root /usr/bin/su
+4755 root:root /usr/libexec/dbus-daemon-launch-helper
+4755 root:root /usr/sbin/unix_chkpwd
 "
-echo "$setuid_table" | while read -r mode path; do
+# NAMES ARE RESOLVED AGAINST THE ROOTFS, NOT AGAINST THE BUILDER. chown(1)
+# resolves a name using the passwd and group databases of the machine it runs
+# on, and this runs in the build container, which has no `messagebus` -- so the
+# obvious `chown root:messagebus` fails the build, and on a builder that
+# happened to HAVE a messagebus with a different id it would silently write the
+# wrong one. That is finding 51's shape (cups grepping the builder's
+# /etc/passwd for its print user) applied to a chown. The /var/lib pass below
+# already reads the rootfs's own /etc/passwd for exactly this reason.
+lookup_id() {
+	# $1 = name, $2 = passwd|group
+	awk -F: -v n="$1" '$1 == n { print $3; exit }' "$rootfs/etc/$2"
+}
+echo "$setuid_table" | while read -r mode owner path; do
 	[ -n "$mode" ] || continue
 	[ -f "$rootfs$path" ] || continue
-	log "restoring $mode on $path"
+	u=${owner%%:*}
+	g=${owner##*:}
+	uid=$(lookup_id "$u" passwd)
+	gid=$(lookup_id "$g" group)
+	if [ -z "$uid" ] || [ -z "$gid" ]; then
+		die "$path wants $owner and the rootfs has no such $( [ -z "$uid" ] && echo user "$u" || echo group "$g" ). This resolves against the ROOTFS's /etc/passwd and /etc/group, not the builder's -- duct-filesystem owns those accounts"
+	fi
+	log "restoring $mode $owner ($uid:$gid) on $path"
+	chown "$uid:$gid" "$rootfs$path"
 	chmod "$mode" "$rootfs$path"
 done
+
+# Asserted outside the loop, because the loop is the right-hand side of a pipe
+# and therefore a subshell: a die() inside it cannot fail this script.
+#
+# On the helper alone, and on the MODE rather than on the file existing -- the
+# file existing is exactly what made this invisible. A dbus that is installed
+# and cannot activate anything is a desktop with no logind, no polkit and no
+# accounts service, and nothing in the build says so.
+helper=$rootfs/usr/libexec/dbus-daemon-launch-helper
+if [ -f "$helper" ]; then
+	mode=$(stat -c %a "$helper")
+	case $mode in
+		4*) : ;;
+		*) die "dbus-daemon-launch-helper is mode $mode, not setuid. D-Bus cannot activate any service whose .service file names a User=, which in this tree is all of them -- elogind, polkit, accountsservice, upower, colord, NetworkManager, ModemManager, geoclue, wpa_supplicant. The failure is one line in the bus's log and silence everywhere else" ;;
+	esac
+fi
 
 # ---------------------------------------------------------------------------
 # Caches keyed on what is installed
@@ -199,6 +289,56 @@ if [ -f "$rootfs/etc/passwd" ]; then
 			chown "$uid:$gid" "$rootfs$home"
 		fi
 	done <"$rootfs/etc/passwd"
+fi
+
+# ---------------------------------------------------------------------------
+# Log directories a daemon COMPILES IN and nothing creates
+#
+# The pass above covers state directories, because those are homes and so are
+# derivable from /etc/passwd. A log directory is not anybody's home and is
+# named nowhere a script can read it: gdm's meson turns -Dlog-dir into the
+# LOGDIR macro (meson.build:342) and never installs the directory, so the
+# published package contains NOTHING under /var at all -- checked, not assumed.
+# On a systemd distribution systemd-tmpfiles makes it; here nobody did.
+#
+# What that costs is not a failed boot, it is a SILENT one. gdm builds the
+# greeter's log path as LOGDIR/greeter.log (gdm-launch-environment.c:332-336)
+# and, when it cannot be opened, warns and logs the session to /dev/null
+# instead (gdm-session-worker.c:1944) -- and that warning goes to syslog, which
+# is the channel this medium had no listener for. So the one file that would
+# explain a greeter that did not come up is written to /dev/null, and the
+# complaint about it is written to a socket that is not there. Two silences
+# stacked; the first gdm boot test hit both.
+#
+# A table rather than a derivation, because there is nothing to derive from --
+# and each entry names the binary that owns it, so a path outlives its package
+# by exactly nothing.
+# ---------------------------------------------------------------------------
+
+# "<owner-binary> <mode> <user> <path>"
+logdir_table="
+/usr/sbin/gdm 0711 gdm /var/log/gdm
+"
+echo "$logdir_table" | while read -r owner mode user path; do
+	[ -n "$owner" ] || continue
+	[ -e "$rootfs$owner" ] || continue
+	uid=$(awk -F: -v u="$user" '$1 == u { print $3 }' "$rootfs/etc/passwd")
+	gid=$(awk -F: -v u="$user" '$1 == u { print $4 }' "$rootfs/etc/passwd")
+	if [ -z "$uid" ]; then
+		die "$owner is installed but there is no $user account to own $path"
+	fi
+	if [ ! -d "$rootfs$path" ]; then
+		log "creating $path for $user ($owner writes its logs there)"
+		install -d -m "$mode" "$rootfs$path"
+		chown "$uid:$gid" "$rootfs$path"
+	fi
+done
+
+# Asserted separately from the loop that creates it: the loop runs in a
+# subshell (it is the right-hand side of a pipe), so a die() inside it cannot
+# fail this script, and a check that cannot fail is not a check.
+if [ -e "$rootfs/usr/sbin/gdm" ] && [ ! -d "$rootfs/var/log/gdm" ]; then
+	die "gdm is installed and /var/log/gdm does not exist. gdm compiles that path in as LOGDIR and never creates it, so the greeter's log -- the only account of why a greeter did not start -- goes to /dev/null and the warning about that goes to syslog"
 fi
 
 # ---------------------------------------------------------------------------

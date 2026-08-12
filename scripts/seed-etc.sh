@@ -73,3 +73,50 @@ for name in passwd group hosts; do
 	install -m 0644 "$template" "$target"
 	log "seeded /etc/$name"
 done
+
+# /etc/shadow, DERIVED rather than seeded from a template, because there is no
+# template: duct-filesystem ships /etc/passwd with `root:x:0:0` -- and the `x`
+# means "the password is in /etc/shadow" -- while nothing in the tree creates
+# that file. The comment above already names shadow as the file "owned by
+# nothing"; this is what that costs.
+#
+# EVERY pam_unix LOOKUP FAILS WITHOUT IT, and it fails as PAM_AUTHINFO_UNAVAIL:
+# "Authentication service cannot retrieve authentication info". Measured with
+# pam_acct_mgmt() against the real stacks in this rootfs, three arms:
+#
+#   no /etc/shadow      login/root = 9, gdm-launch-environment/gdm = 9
+#   every entry locked  both 0 (Success)
+#   root empty          both 0 (Success)
+#
+# The first arm is the exact string that failed the live medium's console
+# session on every respawn all night, AND -- once D-Bus activation was
+# repaired and gdm finally got a session worker -- the string gdm reported as
+# "user is not authorized to log in" after it had already reached state
+# AUTHENTICATED. One missing file, two symptoms that looked unrelated for a
+# whole session. Authentication succeeding and AUTHORIZATION failing is the
+# tell: that is the account stack, which is pam_unix, which is this file.
+#
+# EVERY ACCOUNT IS LOCKED, ROOT INCLUDED. A locked password blocks AUTH; it
+# does not block the ACCOUNT check, which is what the measurement above shows
+# and what both gates here actually need -- duct-live's console session runs
+# `login -f root`, which skips authentication and still runs the account
+# stack, and gdm's greeter needs the gdm account to pass the same stack.
+# Offering an interactive password to anyone is a separate decision about a
+# distributed image and is deliberately NOT made here.
+#
+# `!` and not `*`: both refuse authentication, and `!` is what shadow's own
+# tooling writes for a locked account, so `passwd -u` understands it.
+# Derived from the seeded passwd rather than from a fixed list, so an account
+# duct-filesystem adds later cannot silently miss its shadow entry -- which is
+# the failure this whole block exists to prevent, one level up.
+shadow=$rootfs/etc/shadow
+if [ -f "$rootfs/etc/passwd" ] && [ ! -e "$shadow" ] && [ ! -L "$shadow" ]; then
+	# 20000 rather than 0 for the last-change day: pam_unix reads 0 as "the
+	# password must be changed before anything else can happen" and returns
+	# PAM_NEW_AUTHTOK_REQD, which would fail the account check just as surely
+	# as the missing file did, for a completely different reason.
+	awk -F: 'NF >= 3 { print $1 ":!:20000:0:99999:7:::" }' \
+		"$rootfs/etc/passwd" >"$shadow"
+	chmod 0600 "$shadow"
+	log "derived /etc/shadow: $(grep -c . "$shadow") accounts, all locked"
+fi
