@@ -83,8 +83,27 @@ RUN set -eux; \
 # put all of it in a layer and invalidate that layer constantly; and when
 # REPO_URL is an https:// address instead of a path, the mount is simply never
 # read, so the same Dockerfile builds both ways with nothing conditional in it.
+# THE INSTALL LAYER IS CACHED ON THIS FILE AND THE BUILD ARGS, AND ON NOTHING
+# THAT CHANGES WHEN THE REPOSITORY DOES. That is the right behaviour for docker
+# and the wrong one for a package manager: `tape install` fetches whatever the
+# index serves *now*, so rebuilding after a package publishes reuses the layer
+# and silently installs the version from the last build. The ISO comes out
+# green, byte-identical, and does not contain the fix you just published --
+# and nothing in the output says so, because the step is not re-run to say
+# anything.
+#
+# CACHEBUST is empty by default, so ordinary iteration keeps its cache and does
+# not re-download a gigabyte to change a boot script. Pass anything that varies
+# to force a fresh install:
+#
+#     make iso DESKTOP=1 ISO_CACHEBUST=$(date +%s)
+#
+# It is referenced with `echo` rather than left unused, because a build arg
+# nothing consumes does not participate in the cache key at all.
+ARG CACHEBUST=
 RUN --mount=type=bind,from=ductrepo,target=/repo \
     set -eux; \
+    echo "cache key: ${CACHEBUST:-none}"; \
     export TAPE_CONFIG_DIR=/etc/duct-assemble; \
     install -d /rootfs /run; \
     taped & \

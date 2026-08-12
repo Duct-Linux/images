@@ -342,6 +342,13 @@ iso-manifest:
 iso-preflight:
 	@$(CURDIR)/iso/preflight.sh "$(ISO_PREFLIGHT_URL)" $(ISO_PACKAGES)
 
+# Forces the package install to re-run instead of reusing its cached layer.
+# Empty by default: iteration on a boot script should not re-download the whole
+# manifest. Set it to anything that varies -- `ISO_CACHEBUST=$(date +%s)` --
+# when a package has published since the last build, because otherwise the ISO
+# is rebuilt around the OLD package set and says nothing about it.
+ISO_CACHEBUST ?=
+
 ISO_PREFLIGHT_URL ?= https://repo.duct.dss-net.de
 
 # An ISO built from the PUBLISHED repository needs no local one, and the README
@@ -375,6 +382,7 @@ iso: $(if $(ISO_LOCAL_REPO_NEEDED),have-repo,$(ISO_OUT)/.empty-repo) \
 		--build-arg DEBIAN_SNAPSHOT=$(DEBIAN_SNAPSHOT) \
 		--build-arg SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
 		--build-arg REPO_URL=$(ISO_REPO_URL) \
+		--build-arg CACHEBUST=$(ISO_CACHEBUST) \
 		--build-arg VOLID=$(ISO_VOLID) \
 		--build-arg COMPRESSION=$(ISO_COMP) \
 		--build-arg CMDLINE_EXTRA="$(ISO_CMDLINE_EXTRA)" \
