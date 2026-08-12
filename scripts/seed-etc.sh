@@ -3,8 +3,8 @@
 #
 #   seed-etc.sh <rootfs>
 #
-# Three files in /etc are REWRITTEN ON A RUNNING SYSTEM: passwd and group by
-# useradd, and hosts by whatever sets a hostname. If a package owns them, the
+# Four files in /etc are REWRITTEN ON A RUNNING SYSTEM: passwd, group and
+# shadow by user-management tools, and hosts by whatever sets a hostname. If a package owns them, the
 # next upgrade of that package silently replaces them -- tape has no config-file
 # handling at all, no conffile concept, no .rpmnew equivalent. Upgrade stages a
 # temporary file and renames it over the target, with no path treated specially.
@@ -44,7 +44,7 @@ templates=$rootfs/usr/share/duct-filesystem
 
 # Only files that are rewritten in place on a running system. Adding to this
 # list means giving up package updates for that file permanently -- see above.
-for name in passwd group hosts; do
+for name in passwd group shadow hosts; do
 	template=$templates/$name.default
 	target=$rootfs/etc/$name
 
@@ -70,6 +70,8 @@ for name in passwd group hosts; do
 	# far more often than it is run. The directory is created separately, which
 	# costs nothing and works on both.
 	[ -d "$rootfs/etc" ] || install -d -m 0755 "$rootfs/etc"
-	install -m 0644 "$template" "$target"
+	mode=0644
+	[ "$name" = shadow ] && mode=0600
+	install -m "$mode" "$template" "$target"
 	log "seeded /etc/$name"
 done

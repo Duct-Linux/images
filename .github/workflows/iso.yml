@@ -17,11 +17,10 @@ name: live iso
 on:
   workflow_dispatch:
     inputs:
-      desktop:
+      console:
         description: >-
-          Build the desktop ISO: everything the packages tree builds, rather
-          than the console set. Manual only -- a published-repository dispatch
-          builds the console ISO, which is what the distribution is.
+          Build the smaller console/rescue ISO instead of the default GNOME
+          live image. Manual only; published repositories produce GNOME media.
         type: boolean
         default: false
   repository_dispatch:
@@ -85,9 +84,11 @@ jobs:
       - name: Read the ISO package set from the Makefile
         run: |
           set -euo pipefail
-          desktop=
-          if [ "${{ inputs.desktop }}" = "true" ]; then
-            desktop=1
+          desktop=1
+          if [ "${{ inputs.console }}" = "true" ]; then
+            desktop=0
+            echo "DESKTOP=0" >>"$GITHUB_ENV"
+          else
             echo "DESKTOP=1"        >>"$GITHUB_ENV"
             # A desktop ISO is only interesting if something graphical comes
             # up, so the boot test stops asking whether the boot script
@@ -151,10 +152,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.have.outputs.yes == 'true'
         with:
-          # The desktop build produces a file of the same name and a very
-          # different size; naming the artefact for what it is keeps the two
-          # apart in a run list where only the name is visible.
-          name: duct-live-${{ matrix.arch }}${{ inputs.desktop && '-desktop' || '' }}
+          # The optional console build produces a file of the same name and a
+          # very different size; name that variant explicitly in the run list.
+          name: duct-live-${{ matrix.arch }}${{ inputs.console && '-console' || '' }}
           path: out/duct-live-${{ matrix.arch }}.iso
           # An ISO is large and this is not an archive; keep it long enough to
           # download and test, not forever.

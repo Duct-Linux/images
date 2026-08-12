@@ -149,8 +149,8 @@ print-%:
 	@echo $($*)
 
 have-repo:
-	@test -f $(CONTEXT)/packages/out/repo/repo.db.sig || \
-		{ echo "no signed repository -- run: make -C ../distro repo"; exit 1; }
+	@test -f $(LOCAL_REPO)/repo.db.sig || \
+		{ echo "no signed repository at $(LOCAL_REPO) -- run: make -C ../packages repo or override LOCAL_REPO"; exit 1; }
 
 base: have-repo
 	docker buildx build -f $(CURDIR)/Dockerfile.base --load \
@@ -252,7 +252,8 @@ ISO_BASE_PACKAGES  ?= $(BASE_PACKAGES) $(BUILDER_RUNTIME_PACKAGES)
 ISO_BOOT_PACKAGES  ?= bc elfutils busybox kmod util-linux linux grub duct-live
 
 # ---------------------------------------------------------------------------
-# The desktop package set: `make iso DESKTOP=1`
+# The desktop package set. The live image is a GNOME image by default;
+# `DESKTOP=0` is the deliberately smaller console/rescue image.
 #
 # THERE IS NO LIST OF PACKAGE NAMES HERE, AND THAT IS THE DESIGN. The set is
 # everything the packages tree builds that a console ISO does not already
@@ -285,6 +286,8 @@ ISO_BOOT_PACKAGES  ?= bc elfutils busybox kmod util-linux linux grub duct-live
 # one-architecture-only, withdrawn or absent.
 PACKAGES_MK   ?= $(CONTEXT)/packages/Makefile
 PRINT_VARS_MK := $(CURDIR)/scripts/print-vars.mk
+DESKTOP       ?= 1
+DESKTOP_ENABLED := $(filter 1 yes true,$(DESKTOP))
 
 # The value of one variable in the packages Makefile. Recursive (`=`), so it
 # runs only when something asks for the desktop set: a console `make iso` never
@@ -296,7 +299,7 @@ ISO_DESKTOP_PACKAGES = $(filter-out $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES), \
                          $(call packages_var,ALL_PKGS) \
                          $(call packages_var,RUST_LATE_PKGS))
 
-ISO_EXTRA_PACKAGES ?= $(if $(DESKTOP),$(ISO_DESKTOP_PACKAGES),)
+ISO_EXTRA_PACKAGES ?= $(if $(DESKTOP_ENABLED),$(ISO_DESKTOP_PACKAGES),)
 ISO_PACKAGES       ?= $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES) $(ISO_EXTRA_PACKAGES)
 
 # The kernel is only ever built for one architecture at a time, and an ISO is
@@ -373,7 +376,7 @@ $(ISO_OUT)/.empty-repo:
 	@mkdir -p $@
 
 iso: $(if $(ISO_LOCAL_REPO_NEEDED),have-repo,$(ISO_OUT)/.empty-repo) \
-     $(if $(DESKTOP),have-desktop-set) | out
+     $(if $(DESKTOP_ENABLED),have-desktop-set) | out
 	docker buildx build -f $(CURDIR)/Dockerfile.iso \
 		--build-context ductrepo=$(ISO_REPO_CONTEXT) \
 		--build-context ductkey=$(ISO_KEY_DIR) \

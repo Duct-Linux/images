@@ -67,9 +67,9 @@ fi
 # old tree and the new one, which is not obviously wrong until someone notices
 # the ISO growing by 400 MB per build.
 #
-# -all-root: the rootfs is assembled by a build that may not have run as uid 0
-# for every step, and a live system with no user accounts has no use for any
-# ownership but root's.
+# Ownership is preserved from the assembled rootfs. Service accounts and the
+# live desktop user need their state and home directories to retain the uid/gid
+# assigned by post-install.sh.
 #
 # zstd rather than xz. xz produces an image about 8% smaller and decompresses
 # roughly three times slower, and a live ISO decompresses its root filesystem
@@ -100,7 +100,7 @@ fi
 log "squashing the root filesystem with $COMPRESSION"
 mkdir -p "$isoroot/duct"
 mksquashfs "$rootfs" "$isoroot/duct/rootfs.squashfs" \
-	-noappend -all-root \
+	-noappend \
 	-comp "$COMPRESSION" \
 	-b 1M \
 	-no-progress \

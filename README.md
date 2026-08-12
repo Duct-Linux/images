@@ -246,14 +246,13 @@ libGL before it is written.
 
 **No BIOS boot.** See below.
 
-**Nothing starts a graphical session.** `make iso DESKTOP=1` puts the whole
-graphical stack on the medium — including a compositor — but no ISO boots into
-one yet, because nothing on a Duct live system starts `udevd`, the D-Bus system
-bus or a compositor. That is boot wiring and it lives in the `duct-live`
-package; see *The desktop set* below for what is missing and who owns each
-piece. A default ISO boots to a console, as it always has.
+**The default image starts GDM.** The live boot wiring starts udev, the D-Bus
+system bus and elogind in that order, then starts GDM on tty1. GDM opens the
+greeter through PAM and launches the packaged GNOME session. `DESKTOP=0` is the
+explicit console/rescue profile; it keeps login shells on the virtual terminals
+and starts none of the optional graphical services.
 
-### Adding a desktop, or anything else
+### Customizing the package set
 
 The package manifest is one variable:
 
@@ -271,15 +270,16 @@ needs no kernel change.
 ### The desktop set
 
 ```sh
-make iso DESKTOP=1        # 219 packages instead of 40
-make iso-manifest DESKTOP=1   # what that resolves to, sorted
-make iso-preflight DESKTOP=1  # is every one of them installable right now?
+make iso                     # full GNOME live image (the default)
+make iso-manifest            # what that resolves to, sorted
+make iso-preflight           # is every package installable right now?
+make iso DESKTOP=0           # smaller console/rescue image
 ```
 
-`DESKTOP=1` adds everything the packages tree builds that a console ISO does
-not already carry, and **there is no list of package names in this repository**
-to make that happen. The set is derived, at build time, from the packages
-tree's own `ALL_PKGS`:
+The default `DESKTOP=1` adds everything the packages tree builds that a console
+ISO does not already carry, and **there is no list of package names in this
+repository** to make that happen. The set is derived, at build time, from the
+packages tree's own `ALL_PKGS`:
 
 ```
 ISO_DESKTOP_PACKAGES = (ALL_PKGS + RUST_LATE_PKGS) − ISO_BASE − ISO_BOOT
@@ -304,20 +304,19 @@ no shell on it. `make iso-preflight` is the diagnosis: it fetches the published
 index and names every manifest entry as installable, single-architecture,
 withdrawn or absent.
 
-#### What it does *not* give you yet
+#### How the graphical boot is wired
 
-A desktop ISO built today contains `weston`, `mutter`'s dependencies, the whole
-GTK 4 stack, `elogind`, `eudev` and D-Bus — and boots to the same console the
-default ISO does, because nothing starts any of it. The missing pieces are boot
-wiring rather than packages, and all but two of them belong to `duct-live`:
+The desktop image contains GDM, GNOME Shell, Mutter, the GTK stack, elogind,
+eudev and D-Bus. The `duct-live` package starts the system side and GDM starts
+the user session:
 
 | what | where it belongs |
 |---|---|
 | `udevd` started and `udevadm trigger` run | `duct-live`'s `rc` |
 | `dbus-daemon --system` started | `duct-live`'s `rc` |
-| `elogind` started, or verified to be D-Bus activated | `duct-live` + the elogind recipe |
+| `elogind` started before GDM reads the seat state | `duct-live` + the elogind recipe |
 | `bluetoothd` started — bluez ships no activation file without systemd | `duct-live`'s `rc` |
-| a compositor or display manager started at all | `duct-live` |
+| GDM started on tty1; Weston retained as a diagnostic fallback | `duct-live` |
 | `pipewire` and `wireplumber` autostart for the session | those two recipes |
 | `/run/user/<uid>` | already works: `pam_elogind`, asserted below |
 

@@ -60,6 +60,32 @@ run_in() {
 # consequence was first noticed.
 "$(dirname "$0")/seed-etc.sh" "$rootfs"
 
+# A passwd database using `x` without a shadow database fails inside pam_unix
+# as "could not obtain user info". That breaks `login -f` too because its PAM
+# account/session phases still run, and GDM cannot open its greeter session.
+for account in root gdm duct; do
+	grep -q "^$account:" "$rootfs/etc/passwd" || \
+		die "/etc/passwd has no $account account; the live login path cannot start"
+	grep -q "^$account:" "$rootfs/etc/shadow" || \
+		die "/etc/shadow has no $account account; pam_unix would reject the live and GDM sessions"
+done
+[ "$(stat -c %a "$rootfs/etc/shadow")" = 600 ] || \
+	die "/etc/shadow is not mode 600"
+
+# The live desktop is an appliance, not an installed multi-user machine: it
+# must arrive at a usable GNOME session without credentials that do not exist.
+# Keep this policy in the ISO assembler rather than in the gdm package, so an
+# installed system still presents the normal greeter.
+if [ -x "$rootfs/usr/sbin/gdm" ]; then
+	log "enabling GDM autologin for the live duct user"
+	install -d -m 0755 "$rootfs/etc/gdm"
+	cat >"$rootfs/etc/gdm/custom.conf" <<'EOF'
+[daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=duct
+EOF
+fi
+
 # ---------------------------------------------------------------------------
 # The linker cache
 # ---------------------------------------------------------------------------
@@ -130,9 +156,9 @@ done
 #   - tape's archiver zeroes header.Uid/Gid on purpose, so no package can ship
 #     an owner other than root (measured: 0 of 251,608 published entries has a
 #     non-zero owner);
-#   - build-iso.sh packs with `mksquashfs -all-root`, which forces every file
-#     in the image to root:root. The setuid BIT survives that, the GROUP does
-#     not.
+# Package archives contain root-owned entries, so package payloads cannot ship
+# an owner other than root. post-install.sh restores ownership for mutable
+# service state and home directories before the squashfs preserves it.
 # So upstream arrangements that restrict a helper by group -- dbus ships its
 # launch helper 4750 root:messagebus -- cannot work on a Duct system: the file
 # arrives 4750 root:root and the daemon, running as messagebus, cannot execute
@@ -254,6 +280,14 @@ if [ -f "$rootfs/etc/passwd" ]; then
 		fi
 	done <"$rootfs/etc/passwd"
 fi
+
+# Human home directories are outside the /var/lib service-account loop above.
+# build-iso.sh preserves this ownership in the squashfs.
+if [ ! -d "$rootfs/home/duct" ]; then
+	log "creating /home/duct"
+	install -d -m 0750 "$rootfs/home/duct"
+fi
+chown 1000:999 "$rootfs/home/duct"
 
 # ---------------------------------------------------------------------------
 # The one thing between a login and a Wayland socket
