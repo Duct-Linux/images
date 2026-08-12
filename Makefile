@@ -38,7 +38,8 @@ BUILD_ARGS = \
 
 BUILDX = docker buildx build $(BUILD_ARGS) -f $(DOCKERFILE)
 
-.PHONY: build build-multi push shell test pins clean base base-test builder images-test have-repo toolchain chroot chroot-test rust go-image iso iso-test iso-boot-test iso-run
+.PHONY: build build-multi push shell test pins clean base base-test builder images-test have-repo toolchain chroot chroot-test rust go-image iso iso-test iso-boot-test iso-run \
+	have-desktop-set iso-manifest iso-preflight
 
 # ---------------------------------------------------------------------------
 # The cross toolchain. LFS chapter 5, built inside duct/bootstrap.
@@ -249,7 +250,53 @@ ISO_KEY_DIR ?= $(CONTEXT)/packages/out/keys
 # store either -- fetching is what needs one.
 ISO_BASE_PACKAGES  ?= $(BASE_PACKAGES) $(BUILDER_RUNTIME_PACKAGES)
 ISO_BOOT_PACKAGES  ?= bc elfutils busybox kmod util-linux linux grub duct-live
-ISO_EXTRA_PACKAGES ?=
+
+# ---------------------------------------------------------------------------
+# The desktop package set: `make iso DESKTOP=1`
+#
+# THERE IS NO LIST OF PACKAGE NAMES HERE, AND THAT IS THE DESIGN. The set is
+# everything the packages tree builds that a console ISO does not already
+# carry, read out of ../packages/Makefile at build time.
+#
+# The previous attempt at this was 69 package names written out here. It was
+# correct on the day it was written and 110 packages short of the tree ten days
+# later, which is what a snapshot always becomes -- and extending it would only
+# reset the clock. A list of TIER names (GRAPHICS_PKGS, GNOME_PKGS, ...) fails
+# the same way one level up: an enumeration matches what its author could see,
+# so the day a chain adds a list nobody here knows about, the ISO silently
+# stops shipping it. ALL_PKGS is the single line every chain already edits when
+# it lands a tier, so deriving from it is the only form with nothing to rot.
+#
+# RUST_LATE_PKGS is unioned in explicitly because ALL_PKGS does not contain it
+# -- nor RUST_PKGS nor TAPE_PKGS. Of those three, only librsvg is missing from
+# a live medium: uutils-coreutils and tape are already named in BASE_PACKAGES.
+# librsvg is the pixbuf loader for SVG, without which the icon theme is a
+# directory of files nothing can decode.
+#
+# Deliberately NO build-only trimming here. Which packages are build-only is
+# already decided, once, by BUILDER_BUILD_ONLY_PACKAGES above; a second
+# classification in this file would be the same two-lists problem that variable
+# exists to remove.
+#
+# WHAT THIS DOES NOT DO IS FILTER. A package that has merged but not yet
+# published makes `tape install` fail, loudly, and that is correct: dropping
+# names that do not resolve would produce a green ISO with no shell on it. Run
+# `make iso-preflight` for a diagnosis -- it names each package as present,
+# one-architecture-only, withdrawn or absent.
+PACKAGES_MK   ?= $(CONTEXT)/packages/Makefile
+PRINT_VARS_MK := $(CURDIR)/scripts/print-vars.mk
+
+# The value of one variable in the packages Makefile. Recursive (`=`), so it
+# runs only when something asks for the desktop set: a console `make iso` never
+# executes it and does not need a packages checkout at all.
+packages_var = $(shell $(MAKE) --no-print-directory -C $(dir $(PACKAGES_MK)) \
+                 -f $(notdir $(PACKAGES_MK)) -f $(PRINT_VARS_MK) print-$(1) 2>/dev/null)
+
+ISO_DESKTOP_PACKAGES = $(filter-out $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES), \
+                         $(call packages_var,ALL_PKGS) \
+                         $(call packages_var,RUST_LATE_PKGS))
+
+ISO_EXTRA_PACKAGES ?= $(if $(DESKTOP),$(ISO_DESKTOP_PACKAGES),)
 ISO_PACKAGES       ?= $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES) $(ISO_EXTRA_PACKAGES)
 
 # The kernel is only ever built for one architecture at a time, and an ISO is
@@ -258,7 +305,46 @@ ISO_PACKAGES       ?= $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES) $(ISO_EXTRA_PACK
 ISO_ARCH  ?= $(HOST_ARCH)
 ISO_FILE  ?= $(ISO_NAME)-$(ISO_ARCH).iso
 
-iso: have-repo | out
+# An empty desktop set is the dangerous failure, not a loud one: DESKTOP=1
+# would build an ordinary console ISO, pass every check, and be indexed by
+# whoever asked for a desktop as one. Every way it can come back empty is a
+# reader problem rather than a tree problem -- no packages checkout beside this
+# one, a renamed ALL_PKGS, a packages/Makefile that fails to parse -- so this
+# refuses rather than continuing, and prints the command that produced nothing.
+have-desktop-set:
+	@set -eu; \
+	test -f "$(PACKAGES_MK)" || { \
+		echo "DESKTOP=1 needs the packages tree beside this one; no $(PACKAGES_MK)"; \
+		echo "override with: make iso DESKTOP=1 PACKAGES_MK=/path/to/packages/Makefile"; \
+		exit 1; }; \
+	n=$$(printf '%s\n' $(ISO_DESKTOP_PACKAGES) | grep -c . || true); \
+	if [ "$$n" -eq 0 ]; then \
+		echo "DESKTOP=1 but the derived package set is empty."; \
+		echo "ALL_PKGS came back with nothing. Reproduce with:"; \
+		echo "  $(MAKE) -C $(dir $(PACKAGES_MK)) -f $(notdir $(PACKAGES_MK)) -f $(PRINT_VARS_MK) print-ALL_PKGS"; \
+		exit 1; \
+	fi; \
+	echo "==> desktop set: $$n packages derived from $(PACKAGES_MK)"
+
+# What is actually going on the medium. The manifest used to be readable by
+# looking at one variable; now that it is derived, printing it is how it stays
+# a reviewable decision.
+iso-manifest:
+	@printf '%s\n' $(ISO_PACKAGES) | sort
+	@printf '%s packages\n' "$$(printf '%s\n' $(ISO_PACKAGES) | grep -c .)"
+
+# Is every package in the manifest actually installable, right now?
+#
+# This is the check that turns "tape install: no such package" into a list of
+# names with reasons. It asks the published index, because the index is the
+# authority on published-ness -- a merged package is not an installable one,
+# and a green publish run is not evidence that any particular package is in it.
+iso-preflight:
+	@$(CURDIR)/iso/preflight.sh "$(ISO_PREFLIGHT_URL)" $(ISO_PACKAGES)
+
+ISO_PREFLIGHT_URL ?= https://repo.duct.dss-net.de
+
+iso: have-repo $(if $(DESKTOP),have-desktop-set) | out
 	docker buildx build -f $(CURDIR)/Dockerfile.iso \
 		--build-context ductrepo=$(LOCAL_REPO) \
 		--build-context ductkey=$(ISO_KEY_DIR) \
@@ -317,11 +403,17 @@ iso-test:
 #
 # QEMU runs in a container, so this needs nothing installed on the host. It is
 # emulated and therefore slow; BOOT_TIMEOUT=<seconds> if it needs longer.
+#   make iso-boot-test BOOT_GPU=1 BOOT_MARKER="..."
+#
+# forwarded rather than exported, so the two knobs are visible in this file:
+# BOOT_GPU gives the guest a DRM device (needed by anything graphical, and by
+# nothing the console ISO does), BOOT_MARKER is the line that means success.
 iso-boot-test:
 	@set -eu; \
 	iso=$(ISO_OUT)/$(ISO_FILE); \
 	test -f "$$iso" || { echo "no $$iso -- run: make iso"; exit 1; }; \
-	$(CURDIR)/iso/boot-test.sh "$$iso" $(ISO_ARCH)
+	BOOT_GPU="$(BOOT_GPU)" BOOT_MARKER="$(BOOT_MARKER)" \
+		$(CURDIR)/iso/boot-test.sh "$$iso" $(ISO_ARCH)
 
 # ---------------------------------------------------------------------------
 # The installed-system boot path
