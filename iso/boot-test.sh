@@ -30,6 +30,21 @@ timeout_s=${BOOT_TIMEOUT:-900}
 # script -- which is the whole boot path.
 marker=${BOOT_MARKER:-"Duct live system ready"}
 
+# BOOT_GPU=1 gives the guest a DRM device.
+#
+# Not the default, because the console ISO does not need one and every device
+# added to the invocation is another thing that can fail to initialise on a
+# runner. It is not optional for anything graphical: a compositor opens a DRM
+# node, and on QEMU's arm64 `virt` machine there is no display device at all
+# unless one is asked for -- so a session would fail with "no DRM device
+# found", which reads as a driver problem and is a missing -device flag.
+#
+# virtio-gpu-pci on both architectures rather than the x86 default VGA: the
+# kernel is built with CONFIG_DRM_VIRTIO_GPU=y and CONFIG_DRM_SIMPLEDRM=y, and
+# the emulated VGA has no KMS driver in that set. Same device on both keeps the
+# two boots comparable.
+gpu=${BOOT_GPU:-}
+
 image=duct/iso-qemu:latest
 
 die() { echo "boot-test: $*" >&2; exit 1; }
@@ -61,7 +76,7 @@ echo "boot-test: booting $iso (up to ${timeout_s}s, emulated)"
 # diagnosable.
 docker run --rm -i \
 	-v "$(cd "$(dirname "$iso")" && pwd)/$(basename "$iso")":/live.iso:ro \
-	-e "MARKER=$marker" -e "TIMEOUT=$timeout_s" -e "ARCH=$arch" \
+	-e "MARKER=$marker" -e "TIMEOUT=$timeout_s" -e "ARCH=$arch" -e "GPU=$gpu" \
 	"$image" bash -s <<'INNER'
 set -uo pipefail
 
@@ -91,9 +106,20 @@ esac
 # The ROM lives in a separate Debian package, and installing 30 MB of network
 # boot firmware so that a test which does no networking can decline to use it
 # is the wrong way round.
+# Unquoted on purpose: empty must expand to no argument at all, and one flag
+# with an argument must expand to two words.
+# shellcheck disable=SC2086
+gpu_args=
+if [ -n "${GPU:-}" ]; then
+	gpu_args="-device virtio-gpu-pci"
+	echo "boot-test: adding a virtio GPU"
+fi
+
+# shellcheck disable=SC2086
 "$@" -m 2048 -bios "$fw" \
 	-drive "if=none,id=live,file=/live.iso,format=raw,readonly=on" \
 	-device virtio-blk-pci,drive=live \
+	$gpu_args \
 	-nic none \
 	-nographic -no-reboot >/tmp/serial.log 2>&1 &
 qemu_pid=$!

@@ -189,9 +189,12 @@ libGL before it is written.
 
 **No BIOS boot.** See below.
 
-**No graphical session.** The kernel carries the DRM/KMS and input drivers a
-compositor needs, and the manifest can carry the libraries, but a compositor
-and a shell are separate packages. An ISO built today boots to a console.
+**Nothing starts a graphical session.** `make iso DESKTOP=1` puts the whole
+graphical stack on the medium — including a compositor — but no ISO boots into
+one yet, because nothing on a Duct live system starts `udevd`, the D-Bus system
+bus or a compositor. That is boot wiring and it lives in the `duct-live`
+package; see *The desktop set* below for what is missing and who owns each
+piece. A default ISO boots to a console, as it always has.
 
 ### Adding a desktop, or anything else
 
@@ -208,6 +211,99 @@ manifest — the kernel already carries DRM/KMS drivers for Intel, AMD and
 NVIDIA, `simpledrm` for everything else, and evdev, so a graphical session
 needs no kernel change.
 
+### The desktop set
+
+```sh
+make iso DESKTOP=1        # 219 packages instead of 40
+make iso-manifest DESKTOP=1   # what that resolves to, sorted
+make iso-preflight DESKTOP=1  # is every one of them installable right now?
+```
+
+`DESKTOP=1` adds everything the packages tree builds that a console ISO does
+not already carry, and **there is no list of package names in this repository**
+to make that happen. The set is derived, at build time, from the packages
+tree's own `ALL_PKGS`:
+
+```
+ISO_DESKTOP_PACKAGES = (ALL_PKGS + RUST_LATE_PKGS) − ISO_BASE − ISO_BOOT
+```
+
+read by running `make` on `../packages/Makefile` with a one-rule makefile
+(`scripts/print-vars.mk`) added to it. The predecessor of this was 69 package
+names written out here; it was accurate for a day and 110 packages short of the
+tree ten days later. A list of *tier* names would fail the same way one level
+up, because an enumeration only ever matches what its author could see, and the
+day a chain adds a list nobody here knows about the ISO silently stops shipping
+it. `ALL_PKGS` is the one line every chain already edits when a tier lands.
+
+`RUST_LATE_PKGS` is unioned in explicitly: `ALL_PKGS` does not contain it, and
+`librsvg` is the SVG loader without which the icon theme is a directory of
+files nothing can decode.
+
+**Absent packages are not filtered out, ever.** A package that has merged but
+not yet published makes `tape install` fail and the build stop, which is
+correct — silently dropping names that do not resolve produces a green ISO with
+no shell on it. `make iso-preflight` is the diagnosis: it fetches the published
+index and names every manifest entry as installable, single-architecture,
+withdrawn or absent.
+
+#### What it does *not* give you yet
+
+A desktop ISO built today contains `weston`, `mutter`'s dependencies, the whole
+GTK 4 stack, `elogind`, `eudev` and D-Bus — and boots to the same console the
+default ISO does, because nothing starts any of it. The missing pieces are boot
+wiring rather than packages, and all but two of them belong to `duct-live`:
+
+| what | where it belongs |
+|---|---|
+| `udevd` started and `udevadm trigger` run | `duct-live`'s `rc` |
+| `dbus-daemon --system` started | `duct-live`'s `rc` |
+| `elogind` started, or verified to be D-Bus activated | `duct-live` + the elogind recipe |
+| `bluetoothd` started — bluez ships no activation file without systemd | `duct-live`'s `rc` |
+| a compositor or display manager started at all | `duct-live` |
+| `pipewire` and `wireplumber` autostart for the session | those two recipes |
+| `/run/user/<uid>` | already works: `pam_elogind`, asserted below |
+
+The order is load-bearing and not obvious: **udevd, then D-Bus, then elogind,
+then anything graphical.** libinput enumerates through libudev, mutter finds
+DRM nodes the same way, and elogind assigns devices to a seat from udev's tags
+— so an elogind started before udevd has tagged anything owns a seat with no
+master device, and a compositor then fails to take the DRM node in a way that
+reads as a compositor bug.
+
+#### What the ISO build does for a desktop
+
+`post-install.sh` grew four things, all guarded, all no-ops for the console
+manifest:
+
+- an icon cache per installed theme, rather than for `hicolor` by name
+- `dconf update` and `gio-querymodules`, the two caches a desktop reads and a
+  console never does
+- state directories under `/var/lib` for the accounts daemons drop privileges
+  to, created from the rootfs's own `/etc/passwd` — on a systemd distribution
+  `systemd-sysusers` and `systemd-tmpfiles` do this, and here nothing did
+- an assertion that `login(1)`'s PAM stack **reaches** `pam_elogind`, following
+  `include` lines the way PAM does
+
+That last one is a check on the stack rather than on the module file, because a
+`pam_elogind.so` no service reaches is indistinguishable from a working system
+if you only ask whether the file is installed — and it is the module that
+creates `/run/user/<uid>`, which is where a Wayland socket lives. Both arms
+were watched: with the module reachable it says so, with it unreachable it
+fails and names the recipe to fix, and with elogind absent it says nothing at
+all.
+
+To boot one under QEMU, the guest needs a DRM device:
+
+```sh
+make iso-boot-test BOOT_GPU=1
+```
+
+QEMU's arm64 `virt` machine has no display device unless one is asked for, and
+the emulated x86 VGA has no KMS driver in this kernel's configuration — so
+without that flag a compositor reports "no DRM device found", which reads as a
+driver problem and is a missing `-device`.
+
 ### The pieces
 
 ```
@@ -218,6 +314,8 @@ iso/build-iso.sh      runs on the build host: squashfs + ESP + ISO
 iso/early-grub.cfg    compiled into the EFI binary; finds the medium
 iso/grub.cfg.in       the boot menu
 iso/boot-test.sh      boots the result under QEMU, in a container
+iso/preflight.sh      is every package in the manifest installable right now?
+scripts/print-vars.mk lets this Makefile ask packages/Makefile a question
 ```
 
 `post-install.sh` is where a larger package set gets extended. tape has no

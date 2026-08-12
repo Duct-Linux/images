@@ -16,6 +16,14 @@ name: live iso
 
 on:
   workflow_dispatch:
+    inputs:
+      desktop:
+        description: >-
+          Build the desktop ISO: everything the packages tree builds, rather
+          than the console set. Manual only -- a published-repository dispatch
+          builds the console ISO, which is what the distribution is.
+        type: boolean
+        default: false
   repository_dispatch:
     types: [repository-published]
 
@@ -71,14 +79,39 @@ jobs:
           curl -fsS -o /dev/null "$REPO_URL/repo.db.sig"
           echo "repository is serving an index and a signature"
 
+      # DESKTOP=1 makes the Makefile derive the manifest from the packages
+      # tree's ALL_PKGS, which is why that repository is checked out above --
+      # it was already needed for the signing key.
       - name: Read the ISO package set from the Makefile
         run: |
           set -euo pipefail
-          pkgs=$(make -s -C images print-ISO_PACKAGES)
+          desktop=
+          if [ "${{ inputs.desktop }}" = "true" ]; then
+            desktop=1
+            echo "DESKTOP=1"        >>"$GITHUB_ENV"
+            # A desktop ISO is only interesting if something graphical comes
+            # up, so the boot test stops asking whether the boot script
+            # finished and starts asking whether there is a Wayland display.
+            # The socket is the artefact; a compositor's log is prose.
+            echo "BOOT_GPU=1"       >>"$GITHUB_ENV"
+            echo "BOOT_MARKER=wayland display up" >>"$GITHUB_ENV"
+          fi
+          pkgs=$(make -s -C images print-ISO_PACKAGES DESKTOP=$desktop)
           # An empty list would build an ISO containing nothing and succeed.
           [ -n "$pkgs" ] || { echo "::error::ISO package set came back empty"; exit 1; }
           echo "ISO_PACKAGES=$pkgs" >>"$GITHUB_ENV"
           echo "ISO manifest ($(echo $pkgs | wc -w)): $pkgs"
+
+      # Which of them can actually be installed. tape answers this too, forty
+      # minutes in, one name at a time; this answers it for the whole manifest
+      # before anything is built, and distinguishes "not published yet" from
+      # "published for one architecture" -- the second reads as success and
+      # then fails exactly one of these two jobs.
+      - name: Preflight the manifest against the published index
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends sqlite3 >/dev/null
+          make -C images iso-preflight DESKTOP="${DESKTOP:-}" ISO_PREFLIGHT_URL="$REPO_URL"
 
       - name: Build
         if: steps.have.outputs.yes == 'true'
@@ -111,12 +144,17 @@ jobs:
       # no KVM on a GitHub runner by default.
       - name: Boot it
         if: steps.have.outputs.yes == 'true'
-        run: make -C images iso-boot-test ISO_OUT="$PWD/out" ISO_ARCH=${{ matrix.arch }}
+        run: |
+          make -C images iso-boot-test ISO_OUT="$PWD/out" ISO_ARCH=${{ matrix.arch }} \
+            BOOT_GPU="${BOOT_GPU:-}" BOOT_MARKER="${BOOT_MARKER:-}"
 
       - uses: actions/upload-artifact@v4
         if: steps.have.outputs.yes == 'true'
         with:
-          name: duct-live-${{ matrix.arch }}
+          # The desktop build produces a file of the same name and a very
+          # different size; naming the artefact for what it is keeps the two
+          # apart in a run list where only the name is visible.
+          name: duct-live-${{ matrix.arch }}${{ inputs.desktop && '-desktop' || '' }}
           path: out/duct-live-${{ matrix.arch }}.iso
           # An ISO is large and this is not an archive; keep it long enough to
           # download and test, not forever.
