@@ -1,0 +1,253 @@
+name: rust image
+
+# Builds and publishes duct/rust for both architectures.
+#
+# This was the one published image with no workflow. duct/bootstrap and
+# duct/chroot come from bootstrap.yml, duct/base and duct/builder from
+# assemble.yml, and duct/rust came from someone running `make rust` on their own
+# machine and pushing by hand, twice. That is a step nobody should have to
+# schedule, and it is the reason a Dockerfile.rust change could sit merged and
+# have no effect on anything CI builds.
+#
+# Natively per architecture, never emulated, for the same reason bootstrap.yml
+# says so: this image compiles a Rust toolchain's worth of crates, and under
+# QEMU that is hours rather than minutes.
+
+on:
+  # The image changes rarely -- a version pin, or a tool added. Triggering on the
+  # Dockerfile means the rebuild happens when the thing it is built from changes,
+  # rather than when someone remembers.
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.rust'
+      - '.github/workflows/rust.yml'
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push to GHCR'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/duct-linux
+  # Where the pinned rustc releases live. The tarball is not committed here --
+  # it is 170-200 MB -- so it is fetched and checked against the pin in
+  # Dockerfile.rust before the build starts.
+  RUST_DIST: https://static.rust-lang.org/dist
+
+jobs:
+  build:
+    strategy:
+      # false, so that when one architecture fails the other still reports.
+      # Both must succeed for anything to be published -- that is enforced by
+      # the promote job below, not by cancelling here.
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64,  triple: x86_64-unknown-linux-gnu  }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, triple: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # NO "skip if the base image is missing" step here, deliberately, and this
+      # is the one place this workflow diverges from assemble.yml and
+      # bootstrap.yml on purpose.
+      #
+      # Those skip a missing architecture with a notice, which is right for them:
+      # an architecture that has never been bootstrapped has nothing to assemble
+      # and that is a known state rather than an error. It is wrong here. The
+      # consumer of this image is packages/build.yml, which probes
+      # ghcr.io/duct-linux/rust:<arch> and, finding it, schedules the package for
+      # that architecture. A tag that exists but is a rebuild behind is therefore
+      # worse than one that is missing: the probe passes, the job runs, and the
+      # build fails on a tool the image does not have yet -- or, if the tool is
+      # merely older, succeeds against the wrong version.
+      #
+      # So a missing base fails loudly here rather than quietly publishing one
+      # architecture. Bringing up a new architecture means running bootstrap.yml
+      # and assemble.yml first; until then this workflow has nothing to do and
+      # should say so rather than half-succeed.
+      - name: Check the base images exist for this architecture
+        run: |
+          set -euo pipefail
+          missing=0
+          for img in builder bootstrap; do
+            if docker manifest inspect "$REGISTRY/$img:${{ matrix.arch }}" >/dev/null 2>&1; then
+              echo "  $img:${{ matrix.arch }} present"
+            else
+              echo "::error::$REGISTRY/$img:${{ matrix.arch }} does not exist"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::duct/rust builds FROM builder and takes its CA bundle from bootstrap."
+            echo "::error::Run bootstrap.yml and assemble.yml for ${{ matrix.arch }} first."
+            exit 1
+          fi
+
+      # The pins are read from Dockerfile.rust rather than repeated here.
+      #
+      # A version and a hash written in two files are a version and a hash that
+      # will disagree, and the failure mode is the worst kind: the workflow
+      # fetches one tarball, the Dockerfile verifies against the other's hash,
+      # and the error names a checksum mismatch rather than a stale duplicate.
+      # There is one source of truth and this reads it.
+      - name: Read the pins from Dockerfile.rust
+        id: pins
+        run: |
+          set -euo pipefail
+          get() { sed -n "s/^ARG $1=//p" Dockerfile.rust | head -1; }
+
+          rust_version=$(get RUST_VERSION)
+          rust_sha=$(get "RUST_SHA256_$(echo '${{ matrix.arch }}' | tr '[:lower:]' '[:upper:]')")
+
+          # An empty pin is not a missing feature, it is verification silently
+          # switched off -- so it is an error, not a default.
+          [ -n "$rust_version" ] || { echo "::error::no ARG RUST_VERSION in Dockerfile.rust"; exit 1; }
+          [ -n "$rust_sha" ]     || { echo "::error::no ARG RUST_SHA256_* for ${{ matrix.arch }}"; exit 1; }
+
+          echo "rust_version=$rust_version" >>"$GITHUB_OUTPUT"
+          echo "rust_sha=$rust_sha"         >>"$GITHUB_OUTPUT"
+          echo "rustc $rust_version for ${{ matrix.arch }}"
+
+      # Fetched and verified HERE as well as inside the Dockerfile. The
+      # Dockerfile check is what makes the image trustworthy; this one makes the
+      # failure legible, and it fails in seconds rather than after the build has
+      # pulled a 1 GB base image.
+      #
+      # This is the step that replaces the hand-fetch. Until now the tarball was
+      # expected to be sitting in ~/.cache/duct/rust on somebody's laptop, which
+      # is why this image could only be built by the person who had put it there.
+      - name: Fetch and verify the pinned rustc
+        run: |
+          set -euo pipefail
+          mkdir -p rustsrc
+
+          tarball="rust-${{ steps.pins.outputs.rust_version }}-${{ matrix.triple }}.tar.xz"
+          curl -fsSL --retry 3 -o "rustsrc/$tarball" "$RUST_DIST/$tarball"
+
+          want='${{ steps.pins.outputs.rust_sha }}'
+          got=$(sha256sum "rustsrc/$tarball" | cut -d' ' -f1)
+          if [ "$got" != "$want" ]; then
+            echo "::error::$tarball sha256 mismatch: want $want got $got"
+            exit 1
+          fi
+          echo "$tarball verified"
+
+      # BUILDER and BOOTSTRAP are pinned to this architecture's tag rather than
+      # :latest. :latest is a multi-arch manifest and would resolve correctly
+      # here by accident; naming the arch makes it resolve correctly on purpose,
+      # and makes a half-published :latest unable to affect this build.
+      #
+      # The build context is "." and carries nothing: Dockerfile.rust.dockerignore
+      # is a single `*`, because everything this image needs arrives either
+      # through --build-context or from a base image.
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker buildx build -f Dockerfile.rust --load \
+            --build-context ductrust="$PWD/rustsrc" \
+            --build-arg BUILDER="$REGISTRY/builder:${{ matrix.arch }}" \
+            --build-arg BOOTSTRAP="$REGISTRY/bootstrap:${{ matrix.arch }}" \
+            -t "duct/rust:${{ matrix.arch }}" .
+
+      # What the image is FOR, not merely that it built. A layer can succeed and
+      # leave a tool somewhere nothing looks -- which is exactly the trap
+      # Dockerfile.rust documents about CARGO_HOME, where cargo's default install
+      # directory is not the one on PATH at package-build time.
+      - name: Test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/bash "duct/rust:${{ matrix.arch }}" -c '
+            set -eux
+            # Root, or the CI seed step cannot install dependencies into it.
+            [ "$(id -u)" = 0 ] || { echo "duct/rust must run as root; the seed copy needs it" >&2; exit 1; }
+            rustc --version
+            cargo --version
+            gcc --version | head -1
+            pkg-config --version
+          '
+
+      # Pushed to a run-scoped tag, NOT to rust:<arch>.
+      #
+      # This is what makes "both architectures or neither" real. build.yml in the
+      # packages repo consumes rust:<arch>, so publishing that tag from inside a
+      # per-architecture job would make one architecture live the moment it
+      # finished, whatever happened to the other. Nothing consumes a ci- tag, so
+      # pushing it commits to nothing; the promote job below, which runs only
+      # when EVERY matrix leg succeeded, is what makes the pair visible at once.
+      #
+      # These tags accumulate, one pair per rebuild. The image changes rarely and
+      # they are harmless; delete them from the package listing if they get
+      # tiresome.
+      - name: Push the staging tag
+        if: github.event_name == 'push' || inputs.push
+        run: |
+          set -euo pipefail
+          staging="$REGISTRY/rust:ci-${{ matrix.arch }}-${{ github.run_id }}"
+          docker tag "duct/rust:${{ matrix.arch }}" "$staging"
+          docker push "$staging"
+          echo "staged $staging"
+
+  # Runs only if BOTH matrix legs succeeded -- `needs` requires success from
+  # every job it names, and a matrix job is one job. That is the whole gate: a
+  # failed or skipped architecture means this never runs, and rust:<arch> keeps
+  # pointing at the previous good pair for both architectures rather than going
+  # half-forward.
+  promote:
+    needs: build
+    if: github.event_name == 'push' || inputs.push
+    runs-on: ubuntu-latest
+    permissions: { packages: write }
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # imagetools create copies a manifest between tags without pulling the
+      # image, so this is a registry-side operation and takes seconds -- the
+      # architectures are not rebuilt, and nothing here needs QEMU.
+      - name: Promote both architectures, then the multi-arch tag
+        run: |
+          set -euo pipefail
+          for a in x86_64 aarch64; do
+            src="$REGISTRY/rust:ci-$a-${{ github.run_id }}"
+            docker buildx imagetools create -t "$REGISTRY/rust:$a" "$src"
+            echo "promoted rust:$a"
+          done
+
+          # :latest last, and built from the tags just promoted rather than from
+          # whatever happens to be published. Both are known good at this point,
+          # so unlike assemble.yml -- which assembles :latest from whichever
+          # architecture tags exist, because an architecture may legitimately not
+          # be bootstrapped yet -- this one requires the pair and says so.
+          docker buildx imagetools create -t "$REGISTRY/rust:latest" \
+            "$REGISTRY/rust:x86_64" "$REGISTRY/rust:aarch64"
+          docker buildx imagetools inspect "$REGISTRY/rust:latest"
+
+      # The consumer's question, asked here rather than discovered there.
+      # packages/build.yml probes rust:<arch> per architecture and schedules the
+      # package when it resolves; this asserts that both now do.
+      - name: Both architectures resolve
+        run: |
+          set -euo pipefail
+          for a in x86_64 aarch64; do
+            docker manifest inspect "$REGISTRY/rust:$a" >/dev/null \
+              || { echo "::error::rust:$a does not resolve after promotion"; exit 1; }
+            echo "  rust:$a resolves"
+          done
