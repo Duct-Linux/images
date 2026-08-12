@@ -344,9 +344,31 @@ iso-preflight:
 
 ISO_PREFLIGHT_URL ?= https://repo.duct.dss-net.de
 
-iso: have-repo $(if $(DESKTOP),have-desktop-set) | out
+# An ISO built from the PUBLISHED repository needs no local one, and the README
+# has documented that invocation since the ISO existed:
+#
+#   make iso ISO_REPO_URL=https://repo.duct.dss-net.de ISO_KEY_DIR=.../server
+#
+# It has never worked. `iso` depended on have-repo unconditionally, so the
+# command in the README stopped at "no signed repository -- run: make -C
+# ../distro repo" before anything was built. Nobody noticed because the local
+# workflow builds a repository first and CI does not use this target at all.
+#
+# So the dependency follows the source, and the build context does too: when
+# REPO_URL is an https:// address the repository is downloaded and the mount is
+# never read, but buildx still requires the named context to exist -- iso.yml
+# already passes an empty directory for exactly this reason, and this makes the
+# Makefile do what the workflow does.
+ISO_LOCAL_REPO_NEEDED := $(if $(filter http://% https://%,$(ISO_REPO_URL)),,yes)
+ISO_REPO_CONTEXT      := $(if $(ISO_LOCAL_REPO_NEEDED),$(LOCAL_REPO),$(ISO_OUT)/.empty-repo)
+
+$(ISO_OUT)/.empty-repo:
+	@mkdir -p $@
+
+iso: $(if $(ISO_LOCAL_REPO_NEEDED),have-repo,$(ISO_OUT)/.empty-repo) \
+     $(if $(DESKTOP),have-desktop-set) | out
 	docker buildx build -f $(CURDIR)/Dockerfile.iso \
-		--build-context ductrepo=$(LOCAL_REPO) \
+		--build-context ductrepo=$(ISO_REPO_CONTEXT) \
 		--build-context ductkey=$(ISO_KEY_DIR) \
 		--build-arg BOOTSTRAP=$(NAME):latest \
 		--build-arg DEBIAN_DIGEST=$(DEBIAN_DIGEST) \
