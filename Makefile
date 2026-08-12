@@ -101,13 +101,51 @@ TAG_IMAGES    ?= latest
 # What each image is. tape resolves dependencies itself, but listing them makes
 # the contents of each image a reviewable decision rather than a consequence of
 # whatever some recipe happens to depend on.
-BASE_PACKAGES ?= duct-filesystem linux-headers glibc zlib \
+#
+# Every package is in exactly one of the lists below, and the image sets are
+# DEFINED as their union. That is deliberate: there is no separate "image set"
+# to fall out of sync, so a package cannot be added without choosing whether it
+# is build-only or not. Unclassified is not a state this file can represent, so
+# nothing has to check for it.
+#
+# ca-certificates is here rather than bolted onto the ISO set: without a trust
+# store tape cannot complete a TLS handshake, so an image missing it can never
+# install or update anything from the repository it was built from. It has to
+# arrive in the image because it cannot be fetched by a client that does not
+# already have it.
+BASE_PACKAGES ?= duct-filesystem ca-certificates linux-headers glibc zlib \
                  gmp mpfr mpc binutils gcc ncurses bash \
                  uutils-coreutils tape
 
-BUILDER_PACKAGES ?= $(BASE_PACKAGES) \
+# What duct/builder adds and a live medium also runs.
+BUILDER_RUNTIME_PACKAGES ?= \
                  m4 bison flex make gawk sed grep findutils diffutils \
                  tar gzip xz bzip2 patch file pkgconf perl texinfo
+
+# Needed to COMPILE things inside duct/builder, and never run on a live medium.
+# Reasons, not just names -- a name with no reason gets deleted by the next
+# person who cannot see why it is there.
+#
+#   python   grub's configure refuses to run without an interpreter. It was
+#            added because grub built in duct/chroot and FAILED in duct/builder,
+#            which is not deducible from the package name or any flag.
+#   gettext  msgfmt, for packages that ship translations.
+#
+# 56 MB of the two on a medium that cannot use them. The cost of carrying build
+# tooling is constant; the reason for carrying it never existed. At 243 MB that
+# is a fifth of the ISO, and when the desktop manifest lands and the image is
+# near 700 MB it is still 56 MB -- by which time nobody will remember to ask.
+BUILDER_BUILD_ONLY_PACKAGES ?= python gettext
+
+BUILDER_PACKAGES := $(BASE_PACKAGES) $(BUILDER_RUNTIME_PACKAGES) \
+                    $(BUILDER_BUILD_ONLY_PACKAGES)
+
+# Read by .github/workflows/assemble.yml, so the workflow holds no copy of these
+# lists at all. One list and one reader, rather than two lists kept equal by
+# discipline -- which is what they were, and they had already drifted by three
+# packages before anyone noticed.
+print-%:
+	@echo $($*)
 
 have-repo:
 	@test -f $(CONTEXT)/packages/out/repo/repo.db.sig || \
@@ -200,13 +238,16 @@ ISO_KEY_DIR ?= $(CONTEXT)/packages/out/keys
 # set is layered in through -- `make iso ISO_EXTRA_PACKAGES="..."` should be
 # the whole of what adding one costs.
 #
-# ca-certificates is here rather than in BASE_PACKAGES because that variable
-# decides what goes into duct/base and this is not the place to change that.
-# It is not optional for an ISO: without a trust store, the tape on the live
-# system cannot complete a TLS handshake, so it could never install anything
-# from the repository the ISO was built from -- and it cannot fetch the trust
-# store itself, because fetching it is what needs one.
-ISO_BASE_PACKAGES  ?= $(BUILDER_PACKAGES) ca-certificates
+# The image set MINUS the build-only half, derived rather than restated. The
+# builder image and a live medium have different jobs -- one compiles things,
+# one boots -- and carrying the compiler's dependencies onto the medium was
+# convenience rather than design.
+#
+# ca-certificates is no longer appended here: it moved into BASE_PACKAGES, where
+# it always belonged, because an image without a trust store can never install
+# or update anything from the repository it came from and cannot fetch the trust
+# store either -- fetching is what needs one.
+ISO_BASE_PACKAGES  ?= $(BASE_PACKAGES) $(BUILDER_RUNTIME_PACKAGES)
 ISO_BOOT_PACKAGES  ?= bc elfutils busybox kmod util-linux linux grub duct-live
 ISO_EXTRA_PACKAGES ?=
 ISO_PACKAGES       ?= $(ISO_BASE_PACKAGES) $(ISO_BOOT_PACKAGES) $(ISO_EXTRA_PACKAGES)

@@ -26,19 +26,11 @@ env:
   REGISTRY: ghcr.io/duct-linux
   REPO_URL: https://repo.duct.dss-net.de
 
-  # The builder set, plus what it takes to boot. Written out rather than
-  # resolved by tape so that the contents of the ISO are a reviewable decision
-  # -- the same reason assemble.yml lists its packages.
-  #
-  # ca-certificates for the same reason it is in the base image: without a
-  # trust store the tape on the ISO cannot complete a TLS handshake, so a live
-  # system could never install anything from the repository it came from.
-  ISO_PACKAGES: >-
-    duct-filesystem ca-certificates linux-headers glibc zlib gmp mpfr mpc
-    binutils gcc ncurses bash uutils-coreutils tape
-    m4 bison flex make gawk sed grep findutils diffutils
-    tar gzip xz bzip2 patch file pkgconf perl texinfo
-    bc elfutils busybox kmod util-linux linux grub duct-live
+  # The package list is NOT here. It lives in images/Makefile and is read from
+  # it below. It used to be written out again in this file, and in
+  # assemble.yml, and in the Makefile -- three copies, of which the Makefile's
+  # had silently drifted by three packages. This one and the Makefile happened
+  # to agree, which is luck rather than a mechanism.
 
 jobs:
   iso:
@@ -78,6 +70,15 @@ jobs:
           curl -fsS -o /dev/null "$REPO_URL/repo.db"
           curl -fsS -o /dev/null "$REPO_URL/repo.db.sig"
           echo "repository is serving an index and a signature"
+
+      - name: Read the ISO package set from the Makefile
+        run: |
+          set -euo pipefail
+          pkgs=$(make -s -C images print-ISO_PACKAGES)
+          # An empty list would build an ISO containing nothing and succeed.
+          [ -n "$pkgs" ] || { echo "::error::ISO package set came back empty"; exit 1; }
+          echo "ISO_PACKAGES=$pkgs" >>"$GITHUB_ENV"
+          echo "ISO manifest ($(echo $pkgs | wc -w)): $pkgs"
 
       - name: Build
         if: steps.have.outputs.yes == 'true'
