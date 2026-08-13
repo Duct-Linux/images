@@ -95,11 +95,11 @@ jobs:
             # finished and starts asking whether there is a Wayland display.
             # The socket is the artefact; a compositor's log is prose.
             echo "BOOT_GPU=1"       >>"$GITHUB_ENV"
-          # graphical-session prints this only after it has observed the
-          # user's Wayland socket. Keep the test contract identical to the
-          # producer rather than waiting 15 minutes for a phrase it never
-          # emits.
-          echo "BOOT_MARKER=GNOME live session up" >>"$GITHUB_ENV"
+            # graphical-session prints this only after it has observed the
+            # user's Wayland socket. Keep the test contract identical to the
+            # producer rather than waiting 15 minutes for a phrase it never
+            # emits.
+            echo "BOOT_MARKER=GNOME live session up" >>"$GITHUB_ENV"
           fi
           pkgs=$(make -s -C images print-ISO_PACKAGES DESKTOP=$desktop)
           # An empty list would build an ISO containing nothing and succeed.
